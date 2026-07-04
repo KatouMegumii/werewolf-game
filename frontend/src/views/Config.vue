@@ -561,7 +561,7 @@ async function deleteBoardFromDatabase(boardName: string) {
     console.error('从数据库删除板子失败:', err)
   }
 }
-}
+
 
 function toggleFavorite(index: number) {
   const board = filteredBoards.value[index]
