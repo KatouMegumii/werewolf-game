@@ -12,7 +12,7 @@ const routes = [
     component: Login
   },
   {
-    path: '/',
+    path: '/lobby',
     name: 'Lobby',
     component: Lobby,
     meta: { requiresAuth: true }
@@ -28,6 +28,10 @@ const routes = [
     name: 'Room',
     component: Room,
     meta: { requiresAuth: true }
+  },
+  {
+    path: '/',
+    redirect: '/lobby'
   }
 ]
 

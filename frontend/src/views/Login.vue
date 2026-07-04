@@ -3,14 +3,13 @@
     <div class="brand-area">
       <div class="moon"></div>
       <div class="wolf-mark">🐺</div>
-      <h1 class="title">月夜狼人杀</h1>
-      <p class="subtitle">语音发言 · 实时聊天 · 自定义板子</p>
+      <h1 class="title">嘉豪嘉欣狼人杀</h1>
     </div>
 
     <div class="auth-card">
       <div class="segmented" role="tablist">
         <button
-          :class="['active', mode === 'login']"
+          :class="{ active: mode === 'login' }"
           @click="mode = 'login'"
           type="button"
         >

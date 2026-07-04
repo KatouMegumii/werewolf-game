@@ -1,23 +1,42 @@
 <template>
   <div class="room-screen">
     <header class="room-topbar">
-      <button class="icon-btn" @click="goBack" aria-label="返回大厅">‹</button>
+      <button class="icon-btn" @click="goBack" aria-label="返回大厅">
+        <ChevronLeft :size="20" />
+      </button>
       <div class="room-title">
-        <b>房间 {{ roomId }}</b>
-        <span>12 人预女猎白 · 第 1 天白天</span>
+        <div style="display: flex; align-items: center; gap: 8px; justify-content: center;">
+          <b>房间 {{ roomId }}</b>
+          <button class="icon-copy-btn" @click="copyRoomId" title="复制房间号">
+            <Copy :size="16" />
+          </button>
+        </div>
+        <span>{{ playerList.length }}/{{ maxPlayers }} 人 · 等待中</span>
       </div>
-      <button class="icon-btn" @click="showRoomSettings" aria-label="房间设置">⚙</button>
+      <button class="icon-btn" @click="showRoomSettings" aria-label="房间设置">
+        <Settings :size="20" />
+      </button>
     </header>
 
     <div class="room-stage">
       <!-- 左侧玩家座位 -->
       <div class="side-seats" aria-label="左侧玩家">
-        <div v-for="i in 6" :key="`left-${i}`" class="seat" :class="{ host: i === 1, speaking: i === 1 }">
-          <span class="badge" v-if="i === 1">★</span>
-          <div class="seat-avatar">🧙</div>
-          <div class="seat-name">{{ i }} 玩家{{ i }}</div>
-          <div class="seat-tag">{{ i === 1 ? '发言中' : '在线' }}</div>
-        </div>
+        <template v-for="seatIndex in Math.ceil(maxPlayers / 2)" :key="`left-seat-${seatIndex}`">
+          <div
+            v-if="getPlayerBySeat(seatIndex)"
+            class="seat"
+            :class="{ host: seatIndex === 1 }"
+          >
+            <span class="badge" v-if="seatIndex === 1">★</span>
+            <div class="seat-avatar">{{ getPlayerBySeat(seatIndex).avatar }}</div>
+            <div class="seat-name">{{ seatIndex }} {{ getPlayerBySeat(seatIndex).name }}</div>
+            <div class="seat-tag">在线</div>
+          </div>
+          <div v-else class="seat empty" @click="swapSeat(seatIndex)" :title="`点击移至座位 ${seatIndex}`">
+            <div class="seat-avatar">?</div>
+            <div class="seat-name">{{ seatIndex }} 号</div>
+          </div>
+        </template>
       </div>
 
       <!-- 中间面板 -->
@@ -25,18 +44,17 @@
         <!-- 状态卡片 -->
         <section class="status-card" aria-label="当前回合状态">
           <div class="phase-row">
-            <div class="phase">☀ 白天发言</div>
-            <div class="timer">{{ formatTime }}</div>
+            <div class="phase">⏳ 等待中</div>
+            <div class="timer">{{ playerList.length }}/{{ maxPlayers }}</div>
           </div>
-          <div class="status-text">当前轮到 1 号玩家发言。可在底部切换「打字」或「发言」模式。</div>
+          <div class="status-text">房间已创建，等待玩家加入。点击左上角返回可以分享房间号给朋友。</div>
         </section>
 
         <!-- 聊天面板 -->
         <section class="chat-panel" aria-label="房间聊天框信息">
           <div class="chat-head">
             <span>房间聊天</span>
-            <span v-if="chatReady" style="color: #34d399;">● 已连接</span>
-            <span v-else style="color: #a9b4c4;">● 连接中</span>
+            <span style="color: #34d399;">● 已连接</span>
           </div>
           <div class="chat-list" ref="chatListRef">
             <div v-for="(msg, idx) in messages" :key="idx" :class="['msg', msg.type]">
@@ -49,11 +67,20 @@
 
       <!-- 右侧玩家座位 -->
       <div class="side-seats" aria-label="右侧玩家">
-        <div v-for="i in 6" :key="`right-${i}`" class="seat">
-          <div class="seat-avatar">🐺</div>
-          <div class="seat-name">{{ i + 6 }} 玩家{{ i + 6 }}</div>
-          <div class="seat-tag">在线</div>
-        </div>
+        <template v-for="seatIndex in Math.floor(maxPlayers / 2)" :key="`right-seat-${seatIndex}`">
+          <div
+            v-if="getPlayerBySeat(Math.ceil(maxPlayers / 2) + seatIndex)"
+            class="seat"
+          >
+            <div class="seat-avatar">{{ getPlayerBySeat(Math.ceil(maxPlayers / 2) + seatIndex).avatar }}</div>
+            <div class="seat-name">{{ Math.ceil(maxPlayers / 2) + seatIndex }} {{ getPlayerBySeat(Math.ceil(maxPlayers / 2) + seatIndex).name }}</div>
+            <div class="seat-tag">在线</div>
+          </div>
+          <div v-else class="seat empty" @click="swapSeat(Math.ceil(maxPlayers / 2) + seatIndex)" :title="`点击移至座位 ${Math.ceil(maxPlayers / 2) + seatIndex}`">
+            <div class="seat-avatar">?</div>
+            <div class="seat-name">{{ Math.ceil(maxPlayers / 2) + seatIndex }} 号</div>
+          </div>
+        </template>
       </div>
     </div>
 
@@ -61,7 +88,7 @@
     <footer class="room-input-area">
       <div class="mode-switch" role="tablist">
         <button
-          :class="['active', inputMode === 'text']"
+          :class="{ active: inputMode === 'text' }"
           @click="inputMode = 'text'"
           type="button"
         >
@@ -106,13 +133,19 @@
 
     <!-- Toast提示 -->
     <div :class="['toast', { show: showToast }]">{{ toastMessage }}</div>
+
+    <!-- 复制房间号弹窗 -->
+    <div v-if="showCopyToast" :class="['copy-toast', { show: showCopyToast }]">
+      {{ copyToastMessage }}
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useGameStore } from '../stores/gameStore'
+import { ChevronLeft, Settings, Copy, X } from 'lucide-vue-next'
 
 const router = useRouter()
 const route = useRoute()
@@ -121,137 +154,44 @@ const gameStore = useGameStore()
 const roomId = ref(route.params.roomId as string)
 const inputMode = ref<'text' | 'voice'>('text')
 const messageText = ref('')
-const messages = ref<any[]>([])
 const chatListRef = ref<HTMLElement>()
 const showToast = ref(false)
 const toastMessage = ref('')
-const chatReady = ref(true)
-const countdown = ref(59)
+const toastTitle = ref('')
+const showCopyToast = ref(false)
+const copyToastMessage = ref('已复制房间号')
 
-let WebIM: any = null
-let conn: any = null
+// 从 gameStore 获取反应式数据
+const playerList = computed(() => gameStore.playerList)
+const messages = computed(() => gameStore.messages)
+const maxPlayers = computed(() => gameStore.currentRoom?.maxPlayers || 12)
 
-// 计时器格式化
-const formatTime = computed(() => {
-  return `00:${String(countdown.value).padStart(2, '0')}`
-})
-
-onMounted(() => {
+onMounted(async () => {
   if (!gameStore.isLoggedIn) {
     router.push('/login')
     return
   }
 
-  // 初始化计时器
-  setInterval(() => {
-    countdown.value = countdown.value <= 0 ? 59 : countdown.value - 1
-  }, 1000)
-
-  // 初始化环信
-  initEasemob()
-
-  // 添加系统消息
-  messages.value.push({
-    type: 'system',
-    text: '系统：天亮了，昨晚 4 号玩家出局。',
-    from: 'System'
-  })
+  // 初始化 Socket 并加入房间
+  gameStore.initSocket()
+  await nextTick()
+  gameStore.joinRoomSocket(roomId.value)
 })
 
-const initEasemob = async () => {
-  try {
-    const { default: EasemobIM } = await import('easemob-websdk')
-    WebIM = EasemobIM
+// 监听消息变化，自动滚动到底
+watch(messages, () => {
+  scrollChatBottom()
+}, { deep: true })
 
-    console.log('✅ Easemob SDK loaded')
+onUnmounted(() => {
+  // 离开房间时清理
+  gameStore.leaveRoom()
+})
 
-    conn = new WebIM.connection({
-      appKey: gameStore.appKey
-    })
-
-    conn.listen({
-      onOpened: async () => {
-        console.log('✅ Connected to Easemob')
-        chatReady.value = true
-
-        try {
-          await conn.updateUserInfo({
-            nickname: gameStore.nickname
-          })
-          console.log('✅ User nickname updated in Easemob')
-        } catch (err) {
-          console.warn('⚠️ Failed to update user info:', err)
-        }
-      },
-      onClosed: () => {
-        console.log('❌ Disconnected from Easemob')
-        chatReady.value = false
-      },
-      onTextMessage: (message: any) => {
-        console.log('📨 Received message:', message)
-        messages.value.push({
-          type: 'other',
-          from: message.from,
-          text: message.data
-        })
-        scrollChatBottom()
-      },
-      onError: (err: any) => {
-        console.error('❌ Easemob error:', err)
-      }
-    })
-
-    console.log('Attempting to login with:', {
-      user: gameStore.easemobUser,
-      pwd: gameStore.easemobPassword
-    })
-
-    await conn.open({
-      user: gameStore.easemobUser,
-      pwd: gameStore.easemobPassword
-    })
-
-    console.log('✅ Logged in to Easemob')
-  } catch (error) {
-    console.error('❌ Failed to initialize Easemob:', error)
-  }
-}
-
-const sendMessage = async () => {
+const sendMessage = () => {
   if (!messageText.value.trim()) return
-  if (!chatReady.value) {
-    toast('聊天连接未就绪')
-    return
-  }
-
-  if (!conn || !WebIM) {
-    console.error('WebIM or Connection not initialized')
-    return
-  }
-
-  try {
-    const msg = WebIM.message.create({
-      chatType: 'singleChat',
-      type: 'txt',
-      to: gameStore.easemobUser,
-      msg: messageText.value
-    })
-
-    await conn.send(msg)
-    console.log('📤 Message sent:', messageText.value)
-
-    messages.value.push({
-      type: 'me',
-      from: '我',
-      text: messageText.value
-    })
-
-    messageText.value = ''
-    scrollChatBottom()
-  } catch (error) {
-    console.error('❌ Failed to send message:', error)
-    toast('发送消息失败')
-  }
+  gameStore.sendMessage(messageText.value)
+  messageText.value = ''
 }
 
 const voiceStart = () => {
@@ -259,12 +199,7 @@ const voiceStart = () => {
 }
 
 const voiceEnd = () => {
-  messages.value.push({
-    type: 'me',
-    from: '我',
-    text: '🎙 语音消息 04″'
-  })
-  scrollChatBottom()
+  gameStore.sendMessage('🎙 语音消息 04″')
   toast('语音已发送')
 }
 
@@ -284,14 +219,44 @@ const toast = (message: string) => {
   }, 1600)
 }
 
-const goBack = () => {
+const goBack = async () => {
   if (confirm('确认要返回大厅吗？')) {
-    router.push('/')
+    await gameStore.leaveRoom()
+    router.push('/lobby')
   }
 }
 
 const showRoomSettings = () => {
   toast('房间设置')
+}
+
+const copyRoomId = async () => {
+  try {
+    await navigator.clipboard.writeText(roomId.value)
+    showCopyToast.value = true
+    setTimeout(() => {
+      showCopyToast.value = false
+    }, 1600)
+  } catch (err) {
+    console.error('复制失败:', err)
+  }
+}
+
+// 根据座位号查找玩家
+function getPlayerBySeat(seatNumber: number) {
+  return gameStore.playerList.find(p => p.seatNumber === seatNumber)
+}
+
+// 座位交换功能
+function swapSeat(targetSeatIndex: number) {
+  const currentPlayer = gameStore.playerList.find(p => p.playerId === gameStore.playerId)
+  if (!currentPlayer) return
+
+  // 使用当前玩家的座位号
+  const currentSeatIndex = currentPlayer.seatNumber || 1
+
+  // 调用gameStore的swapSeat方法
+  gameStore.swapSeat(currentSeatIndex, targetSeatIndex)
 }
 </script>
 
@@ -370,6 +335,21 @@ const showRoomSettings = () => {
 .seat.host {
   border-color: rgba(247,200,115,.32);
   background: rgba(247,200,115,.08);
+}
+
+.seat.empty {
+  opacity: .5;
+  cursor: pointer;
+  transition: all .2s ease;
+}
+
+.seat.empty:hover {
+  opacity: .8;
+  background: rgba(255,255,255,.06);
+}
+
+.seat.empty:active {
+  transform: scale(.95);
 }
 
 .seat.dead {
@@ -635,5 +615,96 @@ const showRoomSettings = () => {
 
 .voice-hold:active {
   transform: scale(.98);
+}
+
+.icon-btn {
+  width: 38px;
+  height: 38px;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(255,255,255,.055);
+  color: var(--muted);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: all .2s ease;
+}
+
+.icon-btn:hover {
+  background: rgba(255,255,255,.08);
+  color: #fff;
+}
+
+.icon-copy-btn {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all .2s ease;
+}
+
+.icon-copy-btn:active {
+  transform: scale(.95);
+}
+
+.copy-toast {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%) translateY(20px);
+  min-width: 200px;
+  max-width: calc(100% - 40px);
+  padding: 12px 20px;
+  border-radius: 999px;
+  text-align: center;
+  color: #111827;
+  background: #fde68a;
+  font-size: 13px;
+  font-weight: 900;
+  opacity: 0;
+  pointer-events: none;
+  transition: .22s ease;
+  z-index: 50;
+  box-shadow: 0 16px 35px rgba(0,0,0,.28);
+}
+
+.copy-toast.show {
+  opacity: 1;
+  transform: translate(-50%, -50%) translateY(0);
+}
+
+.toast {
+  position: fixed;
+  bottom: 60px;
+  left: 50%;
+  transform: translateX(-50%) translateY(20px);
+  padding: 12px 20px;
+  border-radius: 999px;
+  background: rgba(0,0,0,.88);
+  color: #fff;
+  font-size: 12px;
+  opacity: 0;
+  pointer-events: none;
+  transition: all .3s ease;
+  z-index: 111;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 </style>

@@ -10,7 +10,9 @@
           <span class="pill">胜率 62%</span>
         </div>
       </div>
-      <button class="icon-btn" @click="showProfileModal = true" aria-label="编辑资料">✎</button>
+      <button class="icon-btn" @click="showProfileModal = true" aria-label="编辑资料">
+        <Edit2 :size="18" />
+      </button>
     </section>
 
     <!-- 房间入口 -->
@@ -32,12 +34,34 @@
     </section>
 
     <!-- 最近房间 -->
-    <div class="room-code-box">
+    <div v-if="lastRoomId" class="room-code-box">
       <div>
         <div class="code-title">最近房间</div>
-        <div class="code-num">839201</div>
+        <div class="code-num">{{ lastRoomId }}</div>
       </div>
       <button class="btn btn-blue" @click="goToRoom">进入房间</button>
+    </div>
+
+    <!-- 有效房间列表 -->
+    <div v-if="validRooms.length > 0" style="margin-top: 20px;">
+      <div class="section-title">
+        <h2>有效房间</h2>
+        <span>{{ validRooms.length }} 个房间</span>
+      </div>
+      <div class="rooms-list">
+        <div
+          v-for="room in validRooms"
+          :key="room.id"
+          class="room-card"
+          @click="enterRoom(room.id)"
+        >
+          <div class="room-header">
+            <div class="room-id">房间 {{ room.id }}</div>
+            <div class="player-count">{{ room.playerCount }}/{{ room.maxPlayers || 12 }}</div>
+          </div>
+          <div class="room-info">{{ room.boardName || '自定义板子' }}</div>
+        </div>
+      </div>
     </div>
 
     <!-- 用户信息模态框 -->
@@ -45,7 +69,9 @@
       <div class="modal-card">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
           <h2 style="margin: 0; font-size: 18px;">用户信息设置</h2>
-          <button class="close-mini" @click="showProfileModal = false">×</button>
+          <button class="close-mini" @click="showProfileModal = false">
+            <X :size="18" />
+          </button>
         </div>
         <div class="field">
           <div class="label-row"><span>昵称</span><span>房间内显示</span></div>
@@ -62,11 +88,20 @@
       </div>
     </div>
 
+    <!-- 头像选择抽屉的overlay -->
+    <div
+      v-if="showAvatarDrawer"
+      class="drawer-overlay"
+      @click="showAvatarDrawer = false"
+    ></div>
+
     <!-- 头像选择抽屉 -->
     <aside :class="['drawer', { open: showAvatarDrawer }]">
       <div class="drawer-title">
         选择头像
-        <button class="close-mini" @click="showAvatarDrawer = false">×</button>
+        <button class="close-mini" @click="showAvatarDrawer = false">
+          <X :size="18" />
+        </button>
       </div>
       <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;">
         <button
@@ -80,56 +115,54 @@
       </div>
     </aside>
 
+    <!-- 创建房间抽屉的overlay -->
+    <div
+      v-if="activeDrawer === 'createDrawer'"
+      class="drawer-overlay"
+      @click="closeDrawers()"
+    ></div>
+
     <!-- 抽屉菜单 - 创建房间 -->
     <aside :class="['drawer', { open: activeDrawer === 'createDrawer' }]">
       <div class="drawer-title">
         新建房间
-        <button class="close-mini" @click="closeDrawers()">×</button>
+        <button class="close-mini" @click="closeDrawers()">
+          <X :size="18" />
+        </button>
       </div>
       <div class="setting-grid">
         <div class="setting-card">
-          <label>人数</label>
-          <select class="input" style="appearance: none;">
-            <option>12 人</option>
-            <option>10 人</option>
-            <option>9 人</option>
-            <option>8 人</option>
-            <option>6 人</option>
-          </select>
-        </div>
-        <div class="setting-card">
-          <label>板子</label>
-          <select class="input" style="appearance: none;">
-            <option>预女猎白</option>
-            <option>预女猎守</option>
-            <option>狼王守卫</option>
-          </select>
-        </div>
-        <div class="setting-card">
-          <label>发言时长</label>
-          <select class="input" style="appearance: none;">
-            <option>60 秒</option>
-            <option>90 秒</option>
-            <option>120 秒</option>
-          </select>
-        </div>
-        <div class="setting-card">
-          <label>房间权限</label>
-          <select class="input" style="appearance: none;">
-            <option>好友可见</option>
-            <option>公开</option>
-            <option>私密</option>
-          </select>
+          <label>选择板子</label>
+          <div class="board-select-list">
+            <button
+              v-for="(board, index) in userBoards"
+              :key="index"
+              :class="['board-option', { active: selectedBoardId === index }]"
+              @click="selectedBoardId = index"
+            >
+              <div class="board-name">{{ board.name }}</div>
+              <div class="board-info">{{ board.summary }}</div>
+            </button>
+          </div>
         </div>
       </div>
-      <button class="btn btn-primary btn-full" style="margin-top: 14px" @click="createRoom">创建并进入房间</button>
+      <button class="btn btn-primary btn-full" style="margin-top: 14px" @click="createRoom" :disabled="creatingRoom">{{ creatingRoom ? '创建中...' : '创建并进入房间' }}</button>
     </aside>
+
+    <!-- 加入房间抽屉的overlay -->
+    <div
+      v-if="activeDrawer === 'joinDrawer'"
+      class="drawer-overlay"
+      @click="closeDrawers()"
+    ></div>
 
     <!-- 抽屉菜单 - 加入房间 -->
     <aside :class="['drawer', { open: activeDrawer === 'joinDrawer' }]">
       <div class="drawer-title">
         加入房间
-        <button class="close-mini" @click="closeDrawers()">×</button>
+        <button class="close-mini" @click="closeDrawers()">
+          <X :size="18" />
+        </button>
       </div>
       <div class="field">
         <div class="label-row"><span>房间号</span><span>6 位数字</span></div>
@@ -141,10 +174,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useGameStore } from '../stores/gameStore'
 import AppLayout from '../components/AppLayout.vue'
+import { Edit2, X } from 'lucide-vue-next'
 import api from '../api/client'
 
 const router = useRouter()
@@ -154,12 +188,64 @@ const activeDrawer = ref('')
 const profileNickname = ref(gameStore.nickname)
 const profileAvatar = ref(gameStore.avatar || '🧙')
 const joinRoomCode = ref('')
+const lastRoomId = ref(localStorage.getItem('lastRoomId') || '')
 const showToast = ref(false)
 const toastMessage = ref('')
 const showProfileModal = ref(false)
 const showAvatarDrawer = ref(false)
+const selectedBoardId = ref<number | null>(null)
+const validRooms = ref<any[]>([])
+const userBoards = ref<any[]>([])
+const loading = ref(false)
+const creatingRoom = ref(false)
 
 const avatarOptions = ['🧙', '🐺', '🧪', '🏹', '🎭', '🌾', '👻', '🐉', '🦅', '🦊', '🐻', '🦁', '🐼', '🐨', '🐯', '🦓', '🦘', '🐘', '🦏', '🦝', '🦚', '🦜', '🦆', '🦉']
+
+onMounted(async () => {
+  // 检查最近房间是否还有效
+  await checkLastRoom()
+  // 加载用户的板子列表
+  await loadUserBoards()
+  // 加载有效房间列表
+  await loadValidRooms()
+})
+
+async function checkLastRoom() {
+  if (!lastRoomId.value) return
+  try {
+    const res = await api.get(`/api/rooms/${lastRoomId.value}`)
+    // 房间不存在或没有人，清除
+    if (!res.data || res.data.playerCount === 0) {
+      lastRoomId.value = ''
+      localStorage.removeItem('lastRoomId')
+    }
+  } catch (error) {
+    // 房间不存在，清除
+    lastRoomId.value = ''
+    localStorage.removeItem('lastRoomId')
+  }
+}
+
+async function loadUserBoards() {
+  try {
+    const res = await api.get('/api/boards')
+    userBoards.value = res.data || []
+  } catch (error) {
+    console.error('加载板子列表失败:', error)
+    userBoards.value = []
+  }
+}
+
+async function loadValidRooms() {
+  try {
+    const res = await api.get('/api/rooms')
+    // 过滤有效房间（有人的房间）
+    validRooms.value = (res.data || []).filter((room: any) => room.playerCount > 0)
+  } catch (error) {
+    console.error('加载房间列表失败:', error)
+    validRooms.value = []
+  }
+}
 
 function openDrawer(id: string) {
   activeDrawer.value = id
@@ -179,24 +265,11 @@ function toast(message: string) {
 
 function selectAvatar(avatar: string) {
   profileAvatar.value = avatar
-  gameStore.avatar = avatar
-  localStorage.setItem('avatar', avatar)
-
-  // 立即同步到环信
-  api.put(`/api/auth/user/${gameStore.username}`, {
-    avatar: avatar
-  }).then(res => {
-    console.log('✅ 头像已同步到环信:', res.data)
-    toast('头像已更新')
-  }).catch(err => {
-    console.error('❌ 同步到环信失败:', err)
-    toast('同步失败，请重试')
-  })
-
   showAvatarDrawer.value = false
 }
 
 function saveProfile() {
+  // 更新store和localStorage
   gameStore.nickname = profileNickname.value
   gameStore.avatar = profileAvatar.value
   localStorage.setItem('nickname', profileNickname.value)
@@ -217,22 +290,124 @@ function saveProfile() {
   showProfileModal.value = false
 }
 
-function createRoom() {
-  router.push('/room/839201')
-  closeDrawers()
+async function createRoom() {
+  if (selectedBoardId.value === null) {
+    toast('请选择板子')
+    return
+  }
+  if (creatingRoom.value) {
+    return
+  }
+
+  creatingRoom.value = true
+  try {
+    const boardId = userBoards.value[selectedBoardId.value].id
+    const res = await api.post('/api/rooms', {
+      playerName: gameStore.nickname,
+      avatar: gameStore.avatar,
+      boardId: boardId
+    })
+    const roomId = res.data.roomId
+    const playerId = res.data.playerId
+    const chatGroupId = res.data.chatGroupId
+
+    // 更新gameStore（使用ref的.value）
+    ;(gameStore as any).roomId = roomId
+    ;(gameStore as any).playerId = playerId
+    ;(gameStore as any).playerName = gameStore.nickname
+    ;(gameStore as any).chatGroupId = chatGroupId
+
+    lastRoomId.value = roomId
+    localStorage.setItem('lastRoomId', roomId)
+
+    // 获取房间信息（包含maxPlayers）
+    await gameStore.fetchRoomInfo()
+
+    // 初始化Socket和Easemob连接
+    try {
+      await gameStore.getEasemobToken()
+      await gameStore.connectEasemob()
+      await gameStore.joinEasemobGroup(`room_${roomId}`)
+    } catch (error) {
+      console.warn('⚠️ Easemob连接可选，继续进入房间')
+    }
+
+    router.push(`/room/${roomId}`)
+    closeDrawers()
+  } catch (error: any) {
+    console.error('创建房间错误:', error);
+    const errorMsg = error?.response?.data?.error || error?.message || '创建房间失败'
+
+    if (errorMsg.includes('玩家已在房间中')) {
+      toast('您已在房间中，请先离开')
+    } else if (error?.response?.data?.existingRoomId || errorMsg.includes('已在其他房间')) {
+      toast('创建失败：您已在其他房间中')
+    } else {
+      toast(errorMsg)
+    }
+  } finally {
+    creatingRoom.value = false
+  }
 }
 
-function joinRoom() {
+async function joinRoom() {
   if (!joinRoomCode.value) {
     toast('请输入房间号')
     return
   }
-  router.push(`/room/${joinRoomCode.value}`)
-  closeDrawers()
+  try {
+    await gameStore.joinRoom(joinRoomCode.value, gameStore.nickname)
+    lastRoomId.value = joinRoomCode.value
+    localStorage.setItem('lastRoomId', joinRoomCode.value)
+    toast(`成功加入房间 ${joinRoomCode.value}`)
+    router.push(`/room/${joinRoomCode.value}`)
+    closeDrawers()
+  } catch (error: any) {
+    console.error('加入房间错误:', error);
+    const errorMsg = error?.response?.data?.error || error?.message || '加入房间失败'
+
+    if (errorMsg.includes('玩家已在其他房间中')) {
+      toast('您已在其他房间中，请先离开')
+    } else if (errorMsg.includes('不存在')) {
+      toast('房间不存在')
+    } else if (errorMsg.includes('已满')) {
+      toast('房间已满')
+    } else {
+      toast(errorMsg)
+    }
+  }
 }
 
-function goToRoom() {
-  router.push('/room/839201')
+async function goToRoom() {
+  if (!lastRoomId.value) {
+    toast('没有最近的房间')
+    return
+  }
+  router.push(`/room/${lastRoomId.value}`)
+}
+
+async function enterRoom(roomId: string) {
+  try {
+    await gameStore.joinRoom(roomId, gameStore.nickname)
+    lastRoomId.value = roomId
+    localStorage.setItem('lastRoomId', roomId)
+    router.push(`/room/${roomId}`)
+  } catch (error: any) {
+    console.error('进入房间错误:', error);
+    const errorMsg = error?.response?.data?.error || error?.message || '加入房间失败'
+
+    if (errorMsg.includes('玩家已在其他房间中')) {
+      toast('您已在其他房间中，请先离开')
+    } else if (errorMsg.includes('不存在')) {
+      toast('房间不存在或已关闭')
+      // 刷新房间列表
+      loadValidRooms()
+    } else if (errorMsg.includes('已满')) {
+      toast('房间已满')
+    } else {
+      toast(errorMsg)
+    }
+  }
 }
 </script>
 
@@ -453,17 +628,22 @@ function goToRoom() {
   color: var(--muted);
   background: rgba(255,255,255,.08);
   cursor: pointer;
-  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all .2s ease;
 }
 
 .drawer {
   position: fixed;
-  inset: auto 12px calc(82px + var(--safe-bottom)) 12px;
+  inset: 50% auto auto 50%;
+  transform: translate(-50%, -50%) scale(0.9);
   max-height: 74dvh;
-  transform: translateY(18px);
+  width: calc(100% - 32px);
+  max-width: 400px;
   opacity: 0;
   pointer-events: none;
-  transition: .2s ease;
+  transition: all .3s ease;
   z-index: 110;
   padding: 16px;
   border-radius: var(--radius-xl);
@@ -475,9 +655,27 @@ function goToRoom() {
 }
 
 .drawer.open {
-  transform: translateY(0);
+  transform: translate(-50%, -50%) scale(1);
   opacity: 1;
   pointer-events: auto;
+}
+
+.drawer-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 109;
+  backdrop-filter: blur(4px);
+  animation: fadeIn .3s ease;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .drawer-title {
@@ -513,6 +711,92 @@ function goToRoom() {
   min-height: 42px;
 }
 
+.board-select-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.board-option {
+  padding: 12px;
+  border-radius: var(--radius-lg);
+  background: rgba(255,255,255,.055);
+  border: 2px solid rgba(255,255,255,.08);
+  text-align: left;
+  cursor: pointer;
+  transition: all .2s ease;
+  color: var(--text);
+}
+
+.board-option:active {
+  transform: scale(.98);
+}
+
+.board-option.active {
+  background: rgba(253,230,138,.12);
+  border-color: #fde68a;
+}
+
+.board-name {
+  font-weight: 700;
+  font-size: 14px;
+  margin-bottom: 4px;
+}
+
+.board-info {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rooms-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.room-card {
+  padding: 12px;
+  border-radius: var(--radius-lg);
+  background: rgba(255,255,255,.06);
+  border: 1px solid rgba(255,255,255,.08);
+  cursor: pointer;
+  transition: all .2s ease;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.room-card:active {
+  transform: scale(.98);
+  background: rgba(255,255,255,.08);
+}
+
+.room-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.room-id {
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.room-info {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.player-count {
+  font-size: 13px;
+  color: var(--muted);
+  min-width: 50px;
+  text-align: right;
+}
+
 .btn {
   border: 0;
   outline: 0;
@@ -537,7 +821,28 @@ function goToRoom() {
   transform: translateY(1px) scale(.995);
 }
 
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.btn:disabled:active {
+  transform: none;
+}
+
 .btn-primary {
+  color: #1e1307;
+  background: linear-gradient(135deg, #fde68a, #fb923c 56%, #ef4444);
+  box-shadow: 0 14px 30px rgba(239,68,68,.24);
+}
+
+.btn-primary:disabled {
+  background: linear-gradient(135deg, rgba(253,230,138,.5), rgba(251,146,60,.5));
+  box-shadow: none;
+}
+
+.btn-blue {
   color: #1e1307;
   background: linear-gradient(135deg, #fde68a, #fb923c 56%, #ef4444);
   box-shadow: 0 14px 30px rgba(239,68,68,.24);
@@ -565,13 +870,13 @@ function goToRoom() {
   height: 40px;
   border: 0;
   border-radius: 14px;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   color: var(--text);
   background: rgba(255,255,255,.07);
   border: 1px solid rgba(255,255,255,.08);
   cursor: pointer;
-  font-size: 18px;
   transition: all .2s ease;
 }
 

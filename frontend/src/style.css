@@ -145,13 +145,13 @@ body {
   height: 40px;
   border: 0;
   border-radius: 14px;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   color: var(--text);
   background: rgba(255,255,255,.07);
   border: 1px solid rgba(255,255,255,.08);
   cursor: pointer;
-  font-size: 18px;
   transition: all .2s ease;
 }
 .icon-btn:active { transform: scale(.95); }

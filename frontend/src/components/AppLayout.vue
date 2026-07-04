@@ -5,7 +5,7 @@
         <span>🐺</span>
         <span>{{ title }}</span>
       </div>
-      <button class="icon-btn" @click="handleLogout" aria-label="退出登录">⎋</button>
+      <button class="logout-btn" @click="handleLogout" aria-label="退出登录">登出</button>
     </header>
 
     <div class="scroll">
@@ -55,13 +55,13 @@ withDefaults(defineProps<Props>(), {
 })
 
 const currentRoute = computed(() => {
-  if (route.path === '/') return 'lobby'
+  if (route.path === '/lobby') return 'lobby'
   if (route.path === '/config') return 'config'
   return ''
 })
 
 function goToLobby() {
-  router.push('/')
+  router.push('/lobby')
 }
 
 function goToConfig() {
@@ -102,6 +102,7 @@ function handleLogout() {
   gap: 10px;
   font-weight: 900;
   letter-spacing: .04em;
+  font-size: 18px;
 }
 
 .icon-btn {
@@ -109,18 +110,38 @@ function handleLogout() {
   height: 40px;
   border: 0;
   border-radius: 14px;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   color: var(--text);
   background: rgba(255,255,255,.07);
   border: 1px solid rgba(255,255,255,.08);
   cursor: pointer;
-  font-size: 18px;
   transition: all .2s ease;
 }
 
 .icon-btn:active {
   transform: scale(.95);
+}
+
+.logout-btn {
+  padding: 8px 16px;
+  border: 0;
+  border-radius: 10px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 18px;
+  font-weight: 900;
+  cursor: pointer;
+  transition: all .2s ease;
+}
+
+.logout-btn:active {
+  transform: scale(.95);
+}
+
+.logout-btn:hover {
+  background: #dc2626;
 }
 
 .scroll {
@@ -189,7 +210,7 @@ function handleLogout() {
   opacity: 0;
   pointer-events: none;
   transition: .22s ease;
-  z-index: 50;
+  z-index: 111;
   box-shadow: 0 16px 35px rgba(0,0,0,.28);
 }
 
