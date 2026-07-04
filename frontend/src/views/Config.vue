@@ -413,6 +413,7 @@ async function loadBoardsFromDatabase() {
         summary: board.summary,
         roles: JSON.parse(board.roles),
         isFavorite: board.isFavorite,
+        originalName: board.name,  // 记录原始名字
         gameConfig: {
           wolfVictory: '屠边',
           cardFlip: '亮牌',
@@ -595,19 +596,25 @@ function saveRoles(index: number) {
     }
   }
 
+  const originalName = (board as any).originalName || board.name
   updateBoardSummary(board)
 
-  // 保存到数据库（INSERT或UPDATE）
-  saveBoardToDatabase(board)
+  // 保存到数据库（记录原始名字用于更新）
+  saveBoardToDatabase(board, originalName)
 
   editingIndex.value = null
   activeCategory.value = '狼人阵营'
   toast(`板子"${board.name}"已保存`)
 }
 
-async function saveBoardToDatabase(board: Board) {
+async function saveBoardToDatabase(board: Board, originalName?: string) {
   try {
-    // PostgreSQL的UPSERT会自动处理INSERT或UPDATE
+    // 如果名字改了，先删旧的再插新的
+    if (originalName && originalName !== board.name) {
+      await api.delete(`/api/boards/${encodeURIComponent(originalName)}`)
+    }
+
+    // 新增或更新板子
     await api.post('/api/boards', {
       name: board.name,
       roles: board.roles,

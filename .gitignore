@@ -30,5 +30,6 @@ npm-debug.log*
 ROLES_GUIDE.md
 # 配置文件
 backend/.env
+backend/package-lock.json
 frontend/.env
 frontend/vite.config.ts
