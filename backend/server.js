@@ -867,15 +867,17 @@ io.on('connection', (socket) => {
  * 获取用户的板子列表
  * 暂时返回mock数据，实际应该从数据库获取
  */
-app.get('/api/boards', (req, res) => {
+app.get('/api/boards', async (req, res) => {
   try {
     const db = getDb();
     const userId = req.headers['x-user-id'] || 'default';
 
-    const boards = db.prepare('SELECT * FROM boards WHERE userId = ? ORDER BY isFavorite DESC, createdAt DESC')
-      .all(userId);
+    const result = await db.query(
+      'SELECT * FROM boards WHERE userId = $1 ORDER BY isFavorite DESC, createdAt DESC',
+      [userId]
+    );
 
-    res.json(boards || []);
+    res.json(result.rows || []);
   } catch (err) {
     console.error('获取板子列表失败:', err);
     res.status(500).json({ error: '获取板子列表失败' });
@@ -883,7 +885,7 @@ app.get('/api/boards', (req, res) => {
 });
 
 // 保存或更新板子
-app.post('/api/boards', (req, res) => {
+app.post('/api/boards', async (req, res) => {
   try {
     const db = getDb();
     const userId = req.headers['x-user-id'] || 'default';
@@ -893,14 +895,13 @@ app.post('/api/boards', (req, res) => {
       return res.status(400).json({ error: '缺少必要字段' });
     }
 
-    const stmt = db.prepare(`
-      INSERT INTO boards (userId, name, roles, summary, isFavorite)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(userId, name) DO UPDATE SET
-        roles = ?, summary = ?, isFavorite = ?, updatedAt = CURRENT_TIMESTAMP
-    `);
-
-    stmt.run(userId, name, JSON.stringify(roles), summary, isFavorite ? 1 : 0, JSON.stringify(roles), summary, isFavorite ? 1 : 0);
+    await db.query(
+      `INSERT INTO boards (userId, name, roles, summary, isFavorite)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT(userId, name) DO UPDATE SET
+       roles = $3, summary = $4, isFavorite = $5, updatedAt = CURRENT_TIMESTAMP`,
+      [userId, name, JSON.stringify(roles), summary, isFavorite]
+    );
 
     res.json({ message: '板子保存成功' });
   } catch (err) {
