@@ -221,7 +221,7 @@ const handleRegister = async () => {
 
 <style scoped>
 .login-screen {
-  height: 100%;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   overflow-y: auto;

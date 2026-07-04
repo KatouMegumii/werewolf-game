@@ -304,9 +304,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { Heart, Edit2, Trash2, Info, ChevronLeft, X } from 'lucide-vue-next'
 import AppLayout from '../components/AppLayout.vue'
+import api from '../api/client'
 
 const showToast = ref(false)
 const toastMessage = ref('')
@@ -391,28 +392,48 @@ const defaultBoardRoles: Role[] = [
   { ...allRoles.find(r => r.key === 'villager')!, count: 4 },    // 村民×4
 ]
 
-const boards = ref<Board[]>([
-  {
-    name: '12人经典配置',
-    summary: '狼人×4 预言家×1 女巫×1 猎人×1 白痴×1 村民×4',
-    roles: JSON.parse(JSON.stringify(defaultBoardRoles)),
-    isFavorite: false,
-    gameConfig: {
-      wolfVictory: '屠边',
-      cardFlip: '亮牌',
-      witchSelfHeal: '可',
-      chiefElection: '有',
-      doubleExplode: '单爆',
-      chatAfterExplode: '是',
-      cardType: '单身份'
-    }
-  }
-])
+const boards = ref<Board[]>([])
 
 const filteredBoards = computed(() => {
   if (!showFavoriteOnly.value) return boards.value
   return boards.value.filter(b => b.isFavorite)
 })
+
+onMounted(() => {
+  loadBoardsFromDatabase()
+})
+
+async function loadBoardsFromDatabase() {
+  try {
+    const res = await api.get('/api/boards')
+    if (res.data && res.data.length > 0) {
+      // 从数据库加载的板子
+      boards.value = res.data.map((board: any) => ({
+        name: board.name,
+        summary: board.summary,
+        roles: JSON.parse(board.roles),
+        isFavorite: board.isFavorite,
+        gameConfig: {
+          wolfVictory: '屠边',
+          cardFlip: '亮牌',
+          witchSelfHeal: '可',
+          chiefElection: '有',
+          doubleExplode: '单爆',
+          chatAfterExplode: '是',
+          cardType: '单身份'
+        }
+      }))
+    } else {
+      // 数据库没有板子，显示空
+      boards.value = []
+    }
+  } catch (err) {
+    console.error('加载板子失败:', err)
+    // 加载失败也显示空
+    boards.value = []
+  }
+}
+
 
 function getRolesByCategory(category: string): Role[] {
   return allRoles.filter(r => r.category === category)
@@ -561,9 +582,26 @@ function saveRoles(index: number) {
   }
 
   updateBoardSummary(board)
+
+  // 保存到数据库
+  saveBoardToDatabase(board)
+
   editingIndex.value = null
   activeCategory.value = '狼人阵营'
   toast(`板子"${board.name}"已保存`)
+}
+
+async function saveBoardToDatabase(board: Board) {
+  try {
+    await api.post('/api/boards', {
+      name: board.name,
+      roles: board.roles,
+      summary: board.summary,
+      isFavorite: board.isFavorite || false
+    })
+  } catch (err) {
+    console.error('保存板子到数据库失败:', err)
+  }
 }
 
 function toast(message: string) {
@@ -1190,7 +1228,7 @@ function toast(message: string) {
   z-index: 112;
   width: 90%;
   max-width: 500px;
-  height: 75vh;
+  height: 75dvh;
   display: flex;
   flex-direction: column;
   border-radius: 18px;
@@ -1338,7 +1376,7 @@ function toast(message: string) {
   z-index: 114;
   width: 90%;
   max-width: 500px;
-  height: 75vh;
+  height: 75dvh;
   display: flex;
   flex-direction: column;
   border-radius: 18px;

@@ -78,7 +78,7 @@ function handleLogout() {
 
 <style scoped>
 .app-layout {
-  height: 100%;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
