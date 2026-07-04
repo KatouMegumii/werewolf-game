@@ -543,10 +543,24 @@ function editBoard(index: number) {
 function deleteBoard(index: number) {
   const realIndex = boards.value.findIndex(b => b === filteredBoards.value[index])
   if (realIndex !== -1 && boards.value.length > 1) {
+    const boardName = boards.value[realIndex].name
     boards.value.splice(realIndex, 1)
     editingIndex.value = null
+
+    // 删除数据库中的板子
+    deleteBoardFromDatabase(boardName)
+
     toast('板子已删除')
   }
+}
+
+async function deleteBoardFromDatabase(boardName: string) {
+  try {
+    await api.delete(`/api/boards/${encodeURIComponent(boardName)}`)
+  } catch (err) {
+    console.error('从数据库删除板子失败:', err)
+  }
+}
 }
 
 function toggleFavorite(index: number) {
@@ -583,7 +597,7 @@ function saveRoles(index: number) {
 
   updateBoardSummary(board)
 
-  // 保存到数据库
+  // 保存到数据库（INSERT或UPDATE）
   saveBoardToDatabase(board)
 
   editingIndex.value = null
@@ -593,6 +607,7 @@ function saveRoles(index: number) {
 
 async function saveBoardToDatabase(board: Board) {
   try {
+    // PostgreSQL的UPSERT会自动处理INSERT或UPDATE
     await api.post('/api/boards', {
       name: board.name,
       roles: board.roles,
@@ -601,6 +616,7 @@ async function saveBoardToDatabase(board: Board) {
     })
   } catch (err) {
     console.error('保存板子到数据库失败:', err)
+    toast('保存失败，请重试')
   }
 }
 

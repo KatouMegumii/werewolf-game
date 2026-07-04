@@ -34,6 +34,9 @@ body {
     radial-gradient(circle at 16% 16%, rgba(167,139,250,.16), transparent 28%),
     linear-gradient(145deg, #070912 0%, #111827 44%, #0b1020 100%);
   overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 
 #app {
@@ -41,6 +44,20 @@ body {
   height: 100dvh;
   display: flex;
   flex-direction: column;
+}
+
+/* 禁用双击放大和输入框自动放大 */
+input, textarea, select {
+  font-size: 16px !important;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+@supports (-webkit-touch-callout: none) {
+  /* iOS specific */
+  input, textarea {
+    font-size: 16px !important;
+  }
 }
 
 /* 通用组件 */

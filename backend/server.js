@@ -910,6 +910,29 @@ app.post('/api/boards', async (req, res) => {
   }
 });
 
+// 删除板子
+app.delete('/api/boards/:name', async (req, res) => {
+  try {
+    const db = getDb();
+    const userId = req.headers['x-user-id'] || 'default';
+    const boardName = decodeURIComponent(req.params.name);
+
+    const result = await db.query(
+      'DELETE FROM boards WHERE userId = $1 AND name = $2',
+      [userId, boardName]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: '板子不存在' });
+    }
+
+    res.json({ message: '板子删除成功' });
+  } catch (err) {
+    console.error('删除板子失败:', err);
+    res.status(500).json({ error: '删除板子失败' });
+  }
+});
+
 // ===== 基础路由 =====
 
 app.get('/health', (req, res) => {

@@ -28,3 +28,7 @@ npm-debug.log*
 
 # Documentation
 ROLES_GUIDE.md
+# 配置文件
+backend/.env
+frontend/.env
+frontend/vite.config.ts
