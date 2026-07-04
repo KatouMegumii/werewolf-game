@@ -50,7 +50,7 @@
     <div
       v-if="editingIndex !== null"
       class="drawer-overlay"
-      @click="editingIndex = null"
+      @click="cancelEdit()"
     ></div>
 
     <!-- 编辑板子抽屉 -->
@@ -59,7 +59,7 @@
         <!-- 固定顶部：名称 -->
         <div class="drawer-header">
           <div class="name-input-group">
-            <button class="back-btn" @click="editingIndex = null" title="返回">
+            <button class="back-btn" @click="cancelEdit()" title="返回">
               <ChevronLeft :size="20" />
             </button>
             <input
@@ -516,7 +516,7 @@ function getPlayerCount(board: Board): number {
 }
 
 function createNewBoard() {
-  const newBoard: Board = {
+  const newBoard: Board & {originalName?: string} = {
     name: `自定义板子${boards.value.length}`,
     summary: '0人 · 狼人0 · 好人0',
     roles: [],
@@ -529,6 +529,7 @@ function createNewBoard() {
       chatAfterExplode: '是',
       cardType: '单身份'
     }
+    // 不设置originalName，标记为新板子
   }
   boards.value.push(newBoard)
   editingIndex.value = boards.value.length - 1
@@ -539,6 +540,25 @@ function createNewBoard() {
 function editBoard(index: number) {
   editingIndex.value = index
   activeCategory.value = '狼人阵营'
+}
+
+function cancelEdit() {
+  // 如果是新板子（未保存），删除它
+  if (editingIndex.value !== null) {
+    const board = boards.value[editingIndex.value]
+    // 检查是否在数据库中存在（有originalName说明是从数据库加载的）
+    if (!(board as any).originalName) {
+      boards.value.splice(editingIndex.value, 1)
+    }
+  }
+  editingIndex.value = null
+  activeCategory.value = '狼人阵营'
+}
+
+function closeEditDrawer() {
+  // 重新从数据库加载列表，覆盖本地改动
+  loadBoardsFromDatabase()
+  editingIndex.value = null
 }
 
 function deleteBoard(index: number) {
