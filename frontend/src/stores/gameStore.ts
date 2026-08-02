@@ -295,30 +295,27 @@ export const useGameStore = defineStore('game', () => {
 
   // 离开房间
   function leaveRoom() {
-    // 发送离开事件并等服务端ack后再断开（emit后立即disconnect会丢包，导致房间残留30s缓冲期）
-    if (socket && roomId.value && playerId.value) {
+    const oldSocket = socket
+    // 立即释放socket引用：退出后马上重进时，initSocket会新建连接，
+    // 避免joinRoom发到即将断开的旧socket上（否则joinRoomSuccess丢失，看不到自己）
+    socket = null
+
+    // 发送离开事件（连接open时emit会立即走wire；旧连接延迟断开保证包发出）
+    if (oldSocket && roomId.value && playerId.value) {
       console.log(`📤 正在离开房间 ${roomId.value}...`);
-      socket.emit('leaveRoom', {
+      oldSocket.emit('leaveRoom', {
         roomId: roomId.value,
         playerId: playerId.value,
         playerName: playerName.value
-      }, () => {
-        console.log('✅ 服务端已确认离开')
-        doDisconnect()
       })
-    } else {
-      doDisconnect()
     }
 
-    // ack丢失时的兜底：3s后无论如何断开（后端disconnect也有30s缓冲清理兜底）
-    const timer = setTimeout(doDisconnect, 3000)
-    function doDisconnect() {
-      clearTimeout(timer)
-      if (socket) {
-        socket.disconnect()
-        socket = null
+    // 延迟500ms断开旧socket（leaveRoom包留出发送时间；后端还有30s断线缓冲兜底）
+    if (oldSocket) {
+      setTimeout(() => {
+        oldSocket.disconnect()
         console.log('✅ Socket已断开')
-      }
+      }, 500)
     }
 
     // 异步断开Easemob（不阻塞）
