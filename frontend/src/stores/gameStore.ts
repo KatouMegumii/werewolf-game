@@ -157,10 +157,9 @@ export const useGameStore = defineStore('game', () => {
       easemobGroupId.value = groupId
       console.log('✅ Easemob group ready:', groupId)
 
-      // 监听群组消息（自己发的消息已乐观显示，收到回推时跳过避免重复）
+      // 监听群组消息（双通道消息统一走pushMessage去重）
       EasemobService.onGroupMessage((message: any) => {
-        if (message.from === easemobUser.value) return
-        messages.value.push({
+        pushMessage({
           type: 'easemob',
           from: message.from,
           text: message.msg || message.content,
@@ -423,9 +422,7 @@ export const useGameStore = defineStore('game', () => {
     // 接收消息
     socket.on('receiveMessage', (data: any) => {
       console.log('💬 接收消息:', data)
-      // 自己发的消息已乐观显示，socket广播回来时跳过（避免重复）
-      if (data.playerName === playerName.value) return
-      messages.value.push({
+      pushMessage({
         type: data.type || 'player',
         from: data.playerName,
         text: data.message,
@@ -503,37 +500,27 @@ export const useGameStore = defineStore('game', () => {
   }
 
   // 发送聊天消息
-  // 发送聊天消息：环信群聊为主，未连接环信时降级到Socket（不丢消息）
+  // 双通道消息去重：2秒内同发送者同内容视为重复（socket广播与环信回推可能同时到达）
+  function pushMessage(msg: any) {
+    const dup = messages.value.some(m =>
+      m.from === msg.from &&
+      m.text === msg.text &&
+      Math.abs(new Date(m.timestamp).getTime() - new Date(msg.timestamp).getTime()) < 2000
+    )
+    if (!dup) messages.value.push(msg)
+  }
+
+  // 发送聊天消息：socket.io为主通道(实时必达)；环信发送在当前集群挂死(等回执),
+  // 环信保留接收通道(离线/历史消息)，双通道在接收端去重
   function sendMessage(message: string) {
-    // 乐观显示自己的消息（环信SDK不回推发送者自己的消息，需本地显示）
-    messages.value.push({
+    // 乐观显示自己的消息
+    pushMessage({
       type: 'player',
       from: playerName.value,
       text: message,
       timestamp: new Date()
     })
-
-    if (isEasemobConnected.value && easemobGroupId.value) {
-      // 环信发送可能静默挂起(等服务器回执),加5s超时兜底:超时降级Socket发送
-      let settled = false
-      const timer = setTimeout(() => {
-        if (settled) return
-        settled = true
-        console.warn('⚠️ 环信发送超时(5s)，降级Socket发送')
-        sendSocketMessage(message)
-      }, 5000)
-      sendEasemobMessage(message)
-        .then(() => { settled = true; clearTimeout(timer) })
-        .catch((err) => {
-          if (settled) return
-          settled = true
-          clearTimeout(timer)
-          console.warn('⚠️ 环信发送失败，降级Socket:', err)
-          sendSocketMessage(message)
-        })
-    } else {
-      sendSocketMessage(message)
-    }
+    sendSocketMessage(message)
   }
 
   // 通过Socket发送（游戏状态/降级通道）
