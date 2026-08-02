@@ -423,6 +423,8 @@ export const useGameStore = defineStore('game', () => {
     // 接收消息
     socket.on('receiveMessage', (data: any) => {
       console.log('💬 接收消息:', data)
+      // 自己发的消息已乐观显示，socket广播回来时跳过（避免重复）
+      if (data.playerName === playerName.value) return
       messages.value.push({
         type: data.type || 'player',
         from: data.playerName,
@@ -512,10 +514,23 @@ export const useGameStore = defineStore('game', () => {
     })
 
     if (isEasemobConnected.value && easemobGroupId.value) {
-      sendEasemobMessage(message).catch((err) => {
-        console.warn('⚠️ 环信发送失败，降级Socket:', err)
+      // 环信发送可能静默挂起(等服务器回执),加5s超时兜底:超时降级Socket发送
+      let settled = false
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        console.warn('⚠️ 环信发送超时(5s)，降级Socket发送')
         sendSocketMessage(message)
-      })
+      }, 5000)
+      sendEasemobMessage(message)
+        .then(() => { settled = true; clearTimeout(timer) })
+        .catch((err) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          console.warn('⚠️ 环信发送失败，降级Socket:', err)
+          sendSocketMessage(message)
+        })
     } else {
       sendSocketMessage(message)
     }
