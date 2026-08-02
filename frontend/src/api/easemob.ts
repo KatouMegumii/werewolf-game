@@ -16,7 +16,10 @@ export function initEasemobSDK(appKey: string) {
 
   client = new WebIM.connection({
     appKey: appKey,
-    enablePresence: true
+    enablePresence: true,
+    // 尝试禁用压缩:SDK协商了LZ4压缩后发送帧带压缩头,怀疑集群解析问题导致消息被静默丢弃(发送挂起)
+    enableUplinkCompression: false,
+    enableDownlinkCompression: false
   })
 
   // 监听连接事件
