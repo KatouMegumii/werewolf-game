@@ -31,3 +31,4 @@ ROLES_GUIDE.md
 # 配置文件
 backend/.env
 frontend/.env
+.mcp.json
