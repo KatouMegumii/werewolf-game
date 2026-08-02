@@ -24,7 +24,9 @@ const io = new Server(httpServer, {
   cors: {
     origin: process.env.VITE_ALLOWED_ORIGIN || 'http://localhost:5173',
     methods: ['GET', 'POST']
-  }
+  },
+  // 断线检测更快（默认25s），配合30s重连缓冲使用
+  pingTimeout: 10000
 });
 
 // 环信配置
@@ -39,6 +41,89 @@ const EASEMOB_CONFIG = {
 // 内存存储（生产环境应使用数据库）
 const rooms = new Map();
 const players = new Map();
+
+// ===== 环信 REST 封装（群组管理，供房间生命周期使用）=====
+
+// App Token 缓存（有效期约7天，提前1分钟过期重新获取）
+let appTokenCache = { token: null, expiresAt: 0 };
+
+async function getAppToken() {
+  if (appTokenCache.token && Date.now() < appTokenCache.expiresAt - 60_000) {
+    return appTokenCache.token;
+  }
+  const res = await axios.post(
+    `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/token`,
+    {
+      grant_type: 'client_credentials',
+      client_id: EASEMOB_CONFIG.clientId,
+      client_secret: EASEMOB_CONFIG.clientSecret
+    }
+  );
+  appTokenCache = { token: res.data.access_token, expiresAt: Date.now() + res.data.expires_in * 1000 };
+  console.log('✅ App Token refreshed');
+  return appTokenCache.token;
+}
+
+// 创建私有群（群主=owner），返回真实 groupId
+async function createEasemobGroup(owner, name, description) {
+  const appToken = await getAppToken();
+  const res = await axios.post(
+    `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/chatgroups`,
+    {
+      groupname: name,
+      desc: description || '',
+      public: false,
+      owner: owner,
+      members: [],
+      maxusers: 200
+    },
+    {
+      headers: { 'Authorization': `Bearer ${appToken}`, 'Content-Type': 'application/json' }
+    }
+  );
+  return res.data?.data?.groupid;
+}
+
+// 添加群成员（私有群只能被邀请/服务端添加，玩家随后用groupid在前端SDK加入）
+async function addEasemobGroupMember(groupId, username) {
+  const appToken = await getAppToken();
+  await axios.post(
+    `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/chatgroups/${groupId}/users`,
+    { usernames: [username] },
+    {
+      headers: { 'Authorization': `Bearer ${appToken}`, 'Content-Type': 'application/json' }
+    }
+  );
+}
+
+// 移除群成员
+async function removeEasemobGroupMember(groupId, username) {
+  if (!groupId || !username) return;
+  try {
+    const appToken = await getAppToken();
+    await axios.delete(
+      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/chatgroups/${groupId}/users/${username}`,
+      { headers: { 'Authorization': `Bearer ${appToken}` } }
+    );
+  } catch (err) {
+    console.warn(`⚠️ 移除环信群成员 ${username} 失败:`, err.response?.status, err.response?.data?.error || err.message);
+  }
+}
+
+// 解散群组
+async function destroyEasemobGroup(groupId) {
+  if (!groupId) return;
+  try {
+    const appToken = await getAppToken();
+    await axios.delete(
+      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/chatgroups/${groupId}`,
+      { headers: { 'Authorization': `Bearer ${appToken}` } }
+    );
+    console.log(`🗑️ 环信群 ${groupId} 已解散`);
+  } catch (err) {
+    console.warn(`⚠️ 解散环信群 ${groupId} 失败:`, err.response?.status, err.response?.data?.error || err.message);
+  }
+}
 
 // ===== 用户注册 =====
 
@@ -254,8 +339,8 @@ app.post('/api/auth/login', async (req, res) => {
 /**
  * 创建房间
  */
-app.post('/api/rooms', (req, res) => {
-  const { playerName, avatar, boardId, userId } = req.body;
+app.post('/api/rooms', async (req, res) => {
+  const { playerName, avatar, boardId, username } = req.body;
 
   if (!playerName) {
     return res.status(400).json({ error: '玩家名称不能为空' });
@@ -277,7 +362,7 @@ app.post('/api/rooms', (req, res) => {
 
   const newRoomId = String(Math.floor(Math.random() * 900000) + 100000);
   const playerId = uuidv4();
-  const chatGroupId = `room_${newRoomId}`;
+  const groupName = `room_${newRoomId}`;
 
   // 根据boardId确定房间人数
   const boardConfig = {
@@ -286,21 +371,34 @@ app.post('/api/rooms', (req, res) => {
   };
   const board = boardConfig[boardId] || { maxPlayers: 12, name: '默认配置' };
 
+  // 创建环信私有群（群主=房主的环信用户名）；失败不阻塞建房，群聊降级为不可用
+  let easemobGroupId = '';
+  try {
+    easemobGroupId = await createEasemobGroup(username || playerName, groupName, `狼人杀房间 ${newRoomId}`);
+    console.log(`✅ 环信群创建成功: ${easemobGroupId}`);
+  } catch (err) {
+    console.warn('⚠️ 创建环信群失败（不影响建房）:', err.message);
+  }
+
   const room = {
     roomId: newRoomId,
-    chatGroupId,
+    chatGroupId: groupName,
+    easemobGroupId,
     createdAt: new Date(),
     players: [playerId],
     status: 'waiting', // waiting, gaming, ended
     maxPlayers: board.maxPlayers,
     boardId: boardId || 'default',
     boardName: board.name,
+    hostPlayerId: playerId,
+    settings: {},
     gameState: {}
   };
 
   const player = {
     playerId,
     name: playerName,
+    easemobUser: username || playerName, // 环信用户名（群成员管理用）
     avatar: avatar || '🧙',
     roomId: newRoomId,
     role: null,
@@ -315,7 +413,7 @@ app.post('/api/rooms', (req, res) => {
   res.json({
     roomId: newRoomId,
     playerId,
-    chatGroupId,
+    chatGroupId: easemobGroupId || '',
     message: '房间创建成功'
   });
 });
@@ -323,9 +421,9 @@ app.post('/api/rooms', (req, res) => {
 /**
  * 加入房间
  */
-app.post('/api/rooms/:roomId/join', (req, res) => {
+app.post('/api/rooms/:roomId/join', async (req, res) => {
   const { roomId } = req.params;
-  const { playerName, avatar } = req.body;
+  const { playerName, avatar, username } = req.body;
 
   if (!playerName) {
     return res.status(400).json({ error: '玩家名称不能为空' });
@@ -371,6 +469,7 @@ app.post('/api/rooms/:roomId/join', (req, res) => {
     const player = {
       playerId,
       name: playerName,
+      easemobUser: username || playerName, // 环信用户名（群成员管理用）
       avatar: avatar || '🧙',
       roomId,
       role: null,
@@ -380,14 +479,150 @@ app.post('/api/rooms/:roomId/join', (req, res) => {
     };
     room.players.push(playerId);
     players.set(playerId, player);
+
+    // 把新玩家拉进环信群（异步，失败不阻塞入房）
+    if (room.easemobGroupId && player.easemobUser) {
+      addEasemobGroupMember(room.easemobGroupId, player.easemobUser)
+        .then(() => console.log(`✅ 玩家 ${playerName} 已加入环信群 ${room.easemobGroupId}`))
+        .catch(err => console.warn(`⚠️ 添加群成员失败:`, err.message));
+    }
   }
 
   res.json({
     playerId,
-    chatGroupId: room.chatGroupId,
+    chatGroupId: room.easemobGroupId || room.chatGroupId,
     currentPlayers: room.players.length,
     message: '加入房间成功'
   });
+});
+
+// ===== 房主管理 =====
+
+// 判断请求者是否为房主
+function isHost(room, playerId) {
+  return !!room && room.hostPlayerId === playerId;
+}
+
+/**
+ * 踢人（仅房主）
+ */
+app.post('/api/rooms/:roomId/kick', (req, res) => {
+  const { roomId } = req.params;
+  const { playerId, targetPlayerId } = req.body;
+  const room = rooms.get(roomId);
+
+  if (!room) {
+    return res.status(404).json({ error: '房间不存在' });
+  }
+  if (!isHost(room, playerId)) {
+    return res.status(403).json({ error: '只有房主可以踢人' });
+  }
+  if (playerId === targetPlayerId) {
+    return res.status(400).json({ error: '不能踢自己' });
+  }
+
+  const target = players.get(targetPlayerId);
+  if (!target || target.roomId !== roomId) {
+    return res.status(404).json({ error: '玩家不在房间中' });
+  }
+
+  // 先通知被踢者（含其自身），再移除
+  io.to(roomId).emit('playerKicked', {
+    playerId: targetPlayerId,
+    playerName: target.name,
+    reason: '你已被房主移出房间'
+  });
+  removePlayerFromRoom(roomId, targetPlayerId, target.name);
+
+  res.json({ message: `玩家 ${target.name} 已移出房间` });
+});
+
+/**
+ * 转让房主（仅房主）
+ */
+app.post('/api/rooms/:roomId/transfer', (req, res) => {
+  const { roomId } = req.params;
+  const { playerId, targetPlayerId } = req.body;
+  const room = rooms.get(roomId);
+
+  if (!room) {
+    return res.status(404).json({ error: '房间不存在' });
+  }
+  if (!isHost(room, playerId)) {
+    return res.status(403).json({ error: '只有房主可以转让' });
+  }
+  if (playerId === targetPlayerId) {
+    return res.status(400).json({ error: '不能转让给自己' });
+  }
+
+  const target = players.get(targetPlayerId);
+  if (!target || target.roomId !== roomId) {
+    return res.status(404).json({ error: '玩家不在房间中' });
+  }
+
+  room.hostPlayerId = targetPlayerId;
+  io.to(roomId).emit('hostChanged', {
+    hostPlayerId: targetPlayerId,
+    hostName: target.name
+  });
+
+  res.json({ message: `房主已转让给 ${target.name}`, hostPlayerId: targetPlayerId });
+});
+
+/**
+ * 解散房间（仅房主）
+ */
+app.post('/api/rooms/:roomId/dissolve', (req, res) => {
+  const { roomId } = req.params;
+  const { playerId } = req.body;
+  const room = rooms.get(roomId);
+
+  if (!room) {
+    return res.status(404).json({ error: '房间不存在' });
+  }
+  if (!isHost(room, playerId)) {
+    return res.status(403).json({ error: '只有房主可以解散房间' });
+  }
+
+  // 通知所有成员（含房主自己）
+  io.to(roomId).emit('roomDissolved', { reason: '房主解散了房间' });
+
+  // 清理玩家与socket映射，删除房间
+  room.players.forEach(pid => players.delete(pid));
+  socketToPlayer.forEach((info, sid) => {
+    if (info.roomId === roomId) {
+      socketToPlayer.delete(sid);
+    }
+  });
+  rooms.delete(roomId);
+  destroyEasemobGroup(room.easemobGroupId);
+
+  console.log(`💥 房主解散房间 ${roomId}`);
+  res.json({ message: '房间已解散' });
+});
+
+/**
+ * 更新房间设置（仅房主，本轮先存对象，供后续游戏使用）
+ */
+app.put('/api/rooms/:roomId/settings', (req, res) => {
+  const { roomId } = req.params;
+  const { playerId, settings } = req.body;
+  const room = rooms.get(roomId);
+
+  if (!room) {
+    return res.status(404).json({ error: '房间不存在' });
+  }
+  if (!isHost(room, playerId)) {
+    return res.status(403).json({ error: '只有房主可以修改设置' });
+  }
+  if (!settings || typeof settings !== 'object') {
+    return res.status(400).json({ error: '设置无效' });
+  }
+
+  room.settings = { ...room.settings, ...settings };
+  io.to(roomId).emit('roomSettingsUpdated', { settings: room.settings });
+
+  res.json({ settings: room.settings });
 });
 
 /**
@@ -415,6 +650,8 @@ app.get('/api/rooms/:roomId', (req, res) => {
     roomId: room.roomId,
     chatGroupId: room.chatGroupId,
     status: room.status,
+    hostPlayerId: room.hostPlayerId,
+    settings: room.settings,
     players: roomPlayers,
     playerCount: room.players.length,
     maxPlayers: room.maxPlayers
@@ -547,35 +784,57 @@ app.put('/api/auth/user/:username', async (req, res) => {
 // ===== 环信集成 =====
 
 /**
- * 为玩家生成环信连接信息
- * 返回用户的Easemob凭证（username + password）
- * 前端使用这些凭证直接通过WebSocket连接环信SDK
+ * 为玩家签发环信用户Token（免密）
+ * 服务端用App Token调用环信REST获取用户Token，前端用 open({user, accessToken}) 登录
+ * 密码不再下发到前端，前端也不再存储密码
  */
 app.post('/api/easemob/token', async (req, res) => {
-  const { playerId, playerName, username, password } = req.body;
+  const { playerId, playerName, username } = req.body;
 
-  if (!username || !password) {
-    return res.status(400).json({ error: '缺少Easemob用户凭证' });
+  if (!username) {
+    return res.status(400).json({ error: '缺少Easemob用户名' });
   }
 
   try {
-    console.log(`✅ 为玩家 ${playerName} (${username}) 提供Easemob凭证`);
+    console.log(`✅ 为玩家 ${playerName} (${username}) 签发Easemob Token`);
 
-    // 返回用户的Easemob凭证
-    // 前端将使用这些凭证通过Easemob SDK登录
+    // 第1步: 获取App Token
+    const appTokenRes = await axios.post(
+      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/token`,
+      {
+        grant_type: 'client_credentials',
+        client_id: EASEMOB_CONFIG.clientId,
+        client_secret: EASEMOB_CONFIG.clientSecret
+      }
+    );
+    const appToken = appTokenRes.data.access_token;
+
+    // 第2步: 获取用户Token（环信REST: GET /users/{username}/token）
+    const userTokenRes = await axios.get(
+      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/users/${username}/token`,
+      {
+        headers: {
+          'Authorization': `Bearer ${appToken}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    const accessToken = userTokenRes.data.access_token;
+    const expiresIn = userTokenRes.data.expires_in || 7 * 24 * 3600;
+
     res.json({
-      username: username,
-      password: password,
+      username,
+      accessToken,
       appKey: EASEMOB_CONFIG.appKey,
-      userId: username,
-      displayName: playerName,
-      expiresIn: 7 * 24 * 3600
+      expiresIn
     });
 
   } catch (error) {
     console.error('❌ Error:', error.message);
-    res.status(500).json({
-      error: error.message
+    res.status(error.response?.status || 500).json({
+      error: error.message,
+      details: error.response?.data
     });
   }
 });
@@ -585,6 +844,105 @@ app.post('/api/easemob/token', async (req, res) => {
 // 追踪 socket 连接到房间/玩家的映射
 const socketToPlayer = new Map(); // socketId -> { playerId, roomId, playerName }
 
+// 断线缓冲：playerId -> { timer, roomId, playerName }
+// 玩家断连后先缓冲30s，期间重新进入则恢复，超时再真正移除（避免刷新/网络抖动丢房）
+const pendingRemovals = new Map();
+
+/**
+ * 构建房间玩家列表（按座位号排序），过滤players中已不存在的孤儿条目
+ */
+function buildPlayerList(room) {
+  return room.players
+    .map(pid => {
+      const p = players.get(pid);
+      if (!p) return null;
+      return {
+        playerId: p.playerId,
+        name: p.name,
+        avatar: p.avatar || '🧙',
+        role: p.role,
+        isAlive: p.isAlive,
+        seatNumber: p.seatNumber || 1
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => (a.seatNumber || 1) - (b.seatNumber || 1));
+}
+
+/**
+ * 从房间移除玩家并通知其他人；房间空了则删除房间
+ */
+function removePlayerFromRoom(roomId, playerId, playerName) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  const player = players.get(playerId);
+
+  room.players = room.players.filter(pid => pid !== playerId);
+  players.delete(playerId);
+  socketToPlayer.forEach((info, socketId) => {
+    if (info.playerId === playerId) socketToPlayer.delete(socketId);
+  });
+
+  const playerList = buildPlayerList(room);
+  io.to(roomId).emit('playerLeft', {
+    playerId,
+    playerName,
+    totalPlayers: room.players.length,
+    playerList
+  });
+
+  console.log(`📢 房间 ${roomId} 当前玩家: ${room.players.length}`);
+
+  if (room.players.length === 0) {
+    rooms.delete(roomId);
+    console.log(`🗑️ 空房间 ${roomId} 已删除`);
+    // 房间解散，同步解散环信群（失败仅warn，不阻塞）
+    destroyEasemobGroup(room.easemobGroupId);
+  } else if (player?.easemobUser && room.easemobGroupId) {
+    // 房间还有其他人，把离开的玩家移出群（非房主离开）
+    removeEasemobGroupMember(room.easemobGroupId, player.easemobUser);
+  }
+}
+
+/**
+ * 断连缓冲：玩家断连后30s内重新进入则恢复，超时后真正移除
+ */
+function schedulePlayerRemoval(roomId, playerId, playerName) {
+  if (pendingRemovals.has(playerId)) {
+    clearTimeout(pendingRemovals.get(playerId).timer);
+  }
+  const timer = setTimeout(() => {
+    pendingRemovals.delete(playerId);
+    removePlayerFromRoom(roomId, playerId, playerName);
+  }, 30_000);
+  pendingRemovals.set(playerId, { timer, roomId, playerName });
+}
+
+/**
+ * 取消断线移除（玩家在缓冲期内重新进入）
+ */
+function cancelPlayerRemoval(playerId) {
+  const entry = pendingRemovals.get(playerId);
+  if (entry) {
+    clearTimeout(entry.timer);
+    pendingRemovals.delete(playerId);
+    console.log(`🔄 玩家 ${entry.playerName} 在缓冲期内重连，取消移除`);
+  }
+}
+
+// 定时清扫：清理 rooms/players 中的数据不一致（防御，正常情况下不该触发）
+setInterval(() => {
+  for (const [roomId, room] of rooms.entries()) {
+    const before = room.players.length;
+    room.players = room.players.filter(pid => players.has(pid));
+    if (room.players.length === 0 && before > 0) {
+      rooms.delete(roomId);
+      console.log(`🧹 清扫：孤儿房间 ${roomId} 已删除`);
+    }
+  }
+}, 30_000);
+
 io.on('connection', (socket) => {
   console.log(`✅ 客户端连接: ${socket.id}`);
 
@@ -593,6 +951,22 @@ io.on('connection', (socket) => {
     const { roomId, playerId, playerName } = data;
     console.log(`👤 玩家 ${playerName} (${playerId}) 加入房间 ${roomId}`);
 
+    const room = rooms.get(roomId);
+    if (!room) {
+      socket.emit('joinRoomFailed', { reason: '房间不存在' });
+      return;
+    }
+
+    // 鉴权：玩家必须真实存在于房间玩家列表中（防止跳过HTTP入房成为"隐形玩家"）
+    if (!playerId || !room.players.includes(playerId)) {
+      console.warn(`🚫 玩家 ${playerName} 不在房间 ${roomId} 的玩家列表中，拒绝加入`);
+      socket.emit('joinRoomFailed', { reason: '你不在这个房间中，请从大厅进入' });
+      return;
+    }
+
+    // 断线缓冲期内重连：取消计划中的移除
+    cancelPlayerRemoval(playerId);
+
     // 记录 socket 到玩家的映射
     socketToPlayer.set(socket.id, { playerId, roomId, playerName });
 
@@ -600,44 +974,29 @@ io.on('connection', (socket) => {
     socket.join(roomId);
     console.log(`✅ Socket ${socket.id} 已加入房间 ${roomId}`);
 
-    // 获取房间信息
-    const room = rooms.get(roomId);
-    if (room) {
-      // 构建玩家列表数据 - 包含avatar信息和座位号，并按座位号排序
-      const playerList = room.players
-        .map(pid => {
-          const p = players.get(pid);
-          return {
-            playerId: p.playerId,
-            name: p.name,
-            avatar: p.avatar || '🧙',
-            role: p.role,
-            isAlive: p.isAlive,
-            seatNumber: p.seatNumber || 1
-          };
-        })
-        .sort((a, b) => (a.seatNumber || 1) - (b.seatNumber || 1));
+    // 构建玩家列表数据 - 包含avatar信息和座位号，并按座位号排序
+    const playerList = buildPlayerList(room);
 
-      // 通知房间内所有人有新玩家加入
-      io.to(roomId).emit('playerJoined', {
-        playerId,
-        playerName,
-        totalPlayers: room.players.length,
-        playerList
-      });
+    // 通知房间内所有人有新玩家加入
+    io.to(roomId).emit('playerJoined', {
+      playerId,
+      playerName,
+      totalPlayers: room.players.length,
+      playerList
+    });
 
-      // 回复加入者
-      socket.emit('joinRoomSuccess', {
-        roomId,
-        playerId,
-        playerList,
-        totalPlayers: room.players.length,
-        maxPlayers: room.maxPlayers
-      });
+    // 回复加入者
+    socket.emit('joinRoomSuccess', {
+      roomId,
+      playerId,
+      playerList,
+      totalPlayers: room.players.length,
+      maxPlayers: room.maxPlayers,
+      hostPlayerId: room.hostPlayerId
+    });
 
-      console.log(`📢 房间 ${roomId} 当前玩家: ${room.players.length}`);
-      console.log(`👥 玩家列表:`, playerList.map(p => p.name).join(', '));
-    }
+    console.log(`📢 房间 ${roomId} 当前玩家: ${room.players.length}`);
+    console.log(`👥 玩家列表:`, playerList.map(p => p.name).join(', '));
   });
 
   // 玩家发送聊天消息
@@ -747,7 +1106,7 @@ io.on('connection', (socket) => {
     });
   });
 
-  // 玩家离开房间
+  // 玩家离开房间（主动离开，不缓冲，直接移除）
   socket.on('leaveRoom', (data) => {
     const { roomId, playerId, playerName } = data;
     const socketInfo = socketToPlayer.get(socket.id);
@@ -765,6 +1124,9 @@ io.on('connection', (socket) => {
 
     console.log(`👋 玩家 ${actualPlayerName} (${actualPlayerId}) 离开房间 ${actualRoomId}`);
 
+    // 主动离开：取消可能存在的断线缓冲，直接移除
+    cancelPlayerRemoval(actualPlayerId);
+
     // 从socketToPlayer移除
     if (socketInfo) {
       socketToPlayer.delete(socket.id);
@@ -773,90 +1135,20 @@ io.on('connection', (socket) => {
     // 从Socket房间移除
     socket.leave(actualRoomId);
 
-    // 如果房间存在，更新房间数据
-    const room = rooms.get(actualRoomId);
-    if (room) {
-      room.players = room.players.filter(pid => pid !== actualPlayerId);
-      players.delete(actualPlayerId);
-
-      const playerList = room.players
-        .map(pid => {
-          const p = players.get(pid);
-          if (!p) return null;
-          return {
-            playerId: p.playerId,
-            name: p.name,
-            avatar: p.avatar || '🧙',
-            role: p.role,
-            isAlive: p.isAlive,
-            seatNumber: p.seatNumber || 1
-          };
-        })
-        .filter(Boolean)
-        .sort((a, b) => (a.seatNumber || 1) - (b.seatNumber || 1));
-
-      // 通知房间内剩余玩家
-      io.to(actualRoomId).emit('playerLeft', {
-        playerId: actualPlayerId,
-        playerName: actualPlayerName,
-        totalPlayers: room.players.length,
-        playerList
-      });
-
-      console.log(`📢 房间 ${actualRoomId} 当前玩家: ${room.players.length}`);
-
-      // 如果房间空了，删除房间
-      if (room.players.length === 0) {
-        rooms.delete(actualRoomId);
-        console.log(`🗑️ 空房间 ${actualRoomId} 已删除`);
-      }
-    }
+    removePlayerFromRoom(actualRoomId, actualPlayerId, actualPlayerName);
   });
 
-  // 玩家断连处理
+  // 玩家断连处理（断线缓冲30s，期间重连则恢复）
   socket.on('disconnect', () => {
     const socketInfo = socketToPlayer.get(socket.id);
     if (socketInfo) {
       const { playerId, roomId, playerName } = socketInfo;
       console.log(`❌ 玩家 ${playerName} 断连 (socket: ${socket.id})`);
 
-      // 自动从房间移除
-      const room = rooms.get(roomId);
-      if (room) {
-        room.players = room.players.filter(pid => pid !== playerId);
-        players.delete(playerId);
-
-        const playerList = room.players
-          .map(pid => {
-            const p = players.get(pid);
-            if (!p) return null;
-            return {
-              playerId: p.playerId,
-              name: p.name,
-              avatar: p.avatar || '🧙',
-              role: p.role,
-              isAlive: p.isAlive,
-              seatNumber: p.seatNumber || 1
-            };
-          })
-          .filter(Boolean)
-          .sort((a, b) => (a.seatNumber || 1) - (b.seatNumber || 1));
-
-        // 通知其他玩家
-        io.to(roomId).emit('playerLeft', {
-          playerId: playerId,
-          playerName: playerName,
-          totalPlayers: room.players.length,
-          playerList
-        });
-
-        if (room.players.length === 0) {
-          rooms.delete(roomId);
-          console.log(`🗑️ 空房间 ${roomId} 已删除`);
-        }
-      }
-
       socketToPlayer.delete(socket.id);
+
+      // 30s缓冲期，玩家重新进入（刷新/网络抖动）则恢复，超时再移除
+      schedulePlayerRemoval(roomId, playerId, playerName);
     }
   });
 });

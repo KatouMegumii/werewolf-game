@@ -25,9 +25,9 @@
           <div
             v-if="getPlayerBySeat(seatIndex)"
             class="seat"
-            :class="{ host: seatIndex === 1 }"
+            :class="{ host: getPlayerBySeat(seatIndex).playerId === gameStore.currentRoom?.hostPlayerId }"
           >
-            <span class="badge" v-if="seatIndex === 1">★</span>
+            <span class="badge" v-if="getPlayerBySeat(seatIndex).playerId === gameStore.currentRoom?.hostPlayerId">★</span>
             <div class="seat-avatar">{{ getPlayerBySeat(seatIndex).avatar }}</div>
             <div class="seat-name">{{ seatIndex }} {{ getPlayerBySeat(seatIndex).name }}</div>
             <div class="seat-tag">在线</div>
@@ -54,7 +54,7 @@
         <section class="chat-panel" aria-label="房间聊天框信息">
           <div class="chat-head">
             <span>房间聊天</span>
-            <span style="color: #34d399;">● 已连接</span>
+            <span :style="{ color: gameStore.isEasemobConnected ? '#34d399' : '#f59e0b' }">● {{ gameStore.isEasemobConnected ? '环信已连接' : '连接中…' }}</span>
           </div>
           <div class="chat-list" ref="chatListRef">
             <div v-for="(msg, idx) in messages" :key="idx" :class="['msg', msg.type]">
@@ -131,6 +131,29 @@
       </div>
     </footer>
 
+    <!-- 房间设置面板 -->
+    <div v-if="showSettings" class="settings-overlay" @click.self="showSettings = false">
+      <div class="settings-panel">
+        <div class="settings-head">
+          <b>房间设置</b>
+          <button class="icon-btn" @click="showSettings = false" aria-label="关闭">
+            <X :size="18" />
+          </button>
+        </div>
+        <div class="settings-body">
+          <div class="settings-row">房主:<b> {{ hostName || '—' }}</b></div>
+          <div v-for="p in playerList" :key="p.playerId" class="settings-player">
+            <span>{{ p.seatNumber }} 号 {{ p.name }} {{ p.playerId === gameStore.currentRoom?.hostPlayerId ? '★' : '' }}</span>
+            <div class="player-actions" v-if="gameStore.isHost && p.playerId !== gameStore.playerId">
+              <button class="mini-btn" @click="handleTransfer(p.playerId)">转让</button>
+              <button class="mini-btn danger" @click="handleKick(p.playerId)">踢出</button>
+            </div>
+          </div>
+          <button v-if="gameStore.isHost" class="danger-btn" @click="handleDissolve">解散房间</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Toast提示 -->
     <div :class="['toast', { show: showToast }]">{{ toastMessage }}</div>
 
@@ -160,6 +183,7 @@ const toastMessage = ref('')
 const toastTitle = ref('')
 const showCopyToast = ref(false)
 const copyToastMessage = ref('已复制房间号')
+const showSettings = ref(false)
 
 // 从 gameStore 获取反应式数据
 const playerList = computed(() => gameStore.playerList)
@@ -170,6 +194,19 @@ onMounted(async () => {
   if (!gameStore.isLoggedIn) {
     router.push('/login')
     return
+  }
+
+  // 刷新/直接进入时 playerId 为空，需先通过HTTP重新入房（否则后端没有该玩家记录，座位会消失）
+  if (!gameStore.playerId) {
+    try {
+      await gameStore.joinRoom(roomId.value, gameStore.nickname)
+    } catch (error: any) {
+      console.error('自动入房失败:', error)
+      const errorMsg = error?.response?.data?.error || error?.message || '进入房间失败'
+      alert(errorMsg)
+      router.push('/lobby')
+      return
+    }
   }
 
   // 初始化 Socket 并加入房间
@@ -227,7 +264,46 @@ const goBack = async () => {
 }
 
 const showRoomSettings = () => {
-  toast('房间设置')
+  showSettings.value = !showSettings.value
+}
+
+// 房主名（设置面板显示）
+const hostName = computed(() => {
+  const host = playerList.value.find(p => p.playerId === gameStore.currentRoom?.hostPlayerId)
+  return host?.name || ''
+})
+
+// 房主操作（后端校验权限，前端仅房主可见入口）
+async function handleKick(targetPlayerId: string) {
+  if (!confirm('确认将该玩家移出房间？')) return
+  try {
+    await gameStore.kickPlayer(targetPlayerId)
+    toast('已移出房间')
+  } catch (err: any) {
+    toast(err?.response?.data?.error || '踢人失败')
+  }
+}
+
+async function handleTransfer(targetPlayerId: string) {
+  if (!confirm('确认将房主转让给该玩家？')) return
+  try {
+    await gameStore.transferHost(targetPlayerId)
+    toast('房主已转让')
+  } catch (err: any) {
+    toast(err?.response?.data?.error || '转让失败')
+  }
+}
+
+async function handleDissolve() {
+  if (!confirm('确认解散房间？所有玩家将被移出')) return
+  try {
+    await gameStore.dissolveRoom()
+    // 服务端已广播 roomDissolved，这里主动清理并返回大厅
+    gameStore.leaveRoom()
+    router.push('/lobby')
+  } catch (err: any) {
+    toast(err?.response?.data?.error || '解散失败')
+  }
 }
 
 const copyRoomId = async () => {
@@ -697,6 +773,91 @@ function swapSeat(targetSeatIndex: number) {
 .toast.show {
   opacity: 1;
   transform: translateX(-50%) translateY(0);
+}
+
+/* 房间设置面板 */
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.settings-panel {
+  width: min(90vw, 360px);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: #1e2330;
+  border: 1px solid #333a4d;
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid #333a4d;
+  font-size: 15px;
+}
+
+.settings-body {
+  padding: 12px 16px 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-row {
+  font-size: 13px;
+  color: #aab4c8;
+}
+
+.settings-player {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #262c3b;
+  font-size: 13px;
+}
+
+.player-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.mini-btn {
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid #3b4a6b;
+  background: transparent;
+  color: #8fb3ff;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mini-btn.danger {
+  border-color: #6b3b3b;
+  color: #ff8f8f;
+}
+
+.danger-btn {
+  margin-top: 4px;
+  padding: 10px;
+  border-radius: 12px;
+  border: none;
+  background: #5a2d2d;
+  color: #ffb3b3;
+  font-size: 13px;
+  cursor: pointer;
 }
 
 @keyframes fadeIn {

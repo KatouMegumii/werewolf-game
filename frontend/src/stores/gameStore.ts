@@ -4,6 +4,7 @@ import api from '../api/client'
 import { io } from 'socket.io-client'
 import type { Socket } from 'socket.io-client'
 import * as EasemobService from '../api/easemob'
+import router from '../router'
 
 export const useGameStore = defineStore('game', () => {
   // 用户信息
@@ -12,8 +13,9 @@ export const useGameStore = defineStore('game', () => {
   const nickname = ref<string>(localStorage.getItem('nickname') || '')
   const avatar = ref<string>(localStorage.getItem('avatar') || '🧙')
   const easemobUser = ref<string>(localStorage.getItem('easemobUser') || '')
-  const easemobPassword = ref<string>(localStorage.getItem('easemobPassword') || '')
   const appKey = ref<string>(localStorage.getItem('appKey') || '')
+  // 环信用户Token：只存内存 + sessionStorage（刷新免重输密码，关浏览器即失效），密码永不落盘
+  const easemobAccessToken = ref<string>(sessionStorage.getItem('easemobAccessToken') || '')
 
   // Socket.io
   let socket: Socket | null = null
@@ -23,7 +25,6 @@ export const useGameStore = defineStore('game', () => {
   const chatGroupId = ref<string>('')
   const currentRoom = ref<any>(null)
   const rooms = ref<any[]>([])
-  const easemobToken = ref<any>(null)
   const playerList = ref<any[]>([])
   const messages = ref<any[]>([])
 
@@ -37,24 +38,32 @@ export const useGameStore = defineStore('game', () => {
 
   const isLoggedIn = computed(() => !!userId.value && !!username.value)
   const isInRoom = computed(() => !!roomId.value)
+  // 当前玩家是否为房主（基于后端 hostPlayerId，不再依赖座位号）
+  const isHost = computed(() => !!currentRoom.value?.hostPlayerId && currentRoom.value.hostPlayerId === playerId.value)
 
-  // 设置当前用户
+  // 设置当前用户（密码不再进入前端存储；环信凭证由后端签发token）
   function setCurrentUser(user: any) {
     userId.value = user.userId
     username.value = user.username
     nickname.value = user.nickname
     avatar.value = user.avatar || '🧙'
-    easemobUser.value = user.easemobUser
-    easemobPassword.value = user.easemobPassword
+    easemobUser.value = user.easemobUser || user.username
     appKey.value = user.appKey
+
+    // 登录响应若带回token则直接使用（进入房间时也会经 /api/easemob/token 重新签发）
+    if (user.accessToken) {
+      easemobAccessToken.value = user.accessToken
+      sessionStorage.setItem('easemobAccessToken', user.accessToken)
+    }
 
     localStorage.setItem('userId', user.userId)
     localStorage.setItem('username', user.username)
     localStorage.setItem('nickname', user.nickname)
     localStorage.setItem('avatar', user.avatar || '🧙')
-    localStorage.setItem('easemobUser', user.easemobUser)
-    localStorage.setItem('easemobPassword', user.easemobPassword)
+    localStorage.setItem('easemobUser', user.easemobUser || user.username)
     localStorage.setItem('appKey', user.appKey)
+    // 迁移：清理历史遗留的明文密码
+    localStorage.removeItem('easemobPassword')
   }
 
   // 登出
@@ -64,8 +73,9 @@ export const useGameStore = defineStore('game', () => {
     nickname.value = ''
     avatar.value = '🧙'
     easemobUser.value = ''
-    easemobPassword.value = ''
     appKey.value = ''
+    easemobAccessToken.value = ''
+    sessionStorage.removeItem('easemobAccessToken')
     localStorage.removeItem('userId')
     localStorage.removeItem('username')
     localStorage.removeItem('nickname')
@@ -85,7 +95,7 @@ export const useGameStore = defineStore('game', () => {
       return
     }
 
-    if (!easemobUser.value || !easemobPassword.value || !appKey.value) {
+    if (!easemobUser.value || !appKey.value) {
       console.error('❌ Missing Easemob credentials')
       throw new Error('Missing Easemob credentials')
     }
@@ -94,8 +104,13 @@ export const useGameStore = defineStore('game', () => {
       // 初始化SDK
       EasemobService.initEasemobSDK(appKey.value)
 
-      // 登录
-      await EasemobService.loginEasemob(easemobUser.value, easemobPassword.value)
+      // 无可用token时先向服务端签发（免密）
+      if (!easemobAccessToken.value) {
+        await getEasemobToken()
+      }
+
+      // 用token登录（不再使用密码）
+      await EasemobService.loginEasemob(easemobUser.value, easemobAccessToken.value)
 
       isEasemobConnected.value = true
       console.log('✅ Easemob connected and logged in')
@@ -121,17 +136,24 @@ export const useGameStore = defineStore('game', () => {
     }
   }
 
-  // 加入Easemob群组
-  async function joinEasemobGroup(groupName: string) {
+  // 加入Easemob群组（groupId为服务端REST创建群后返回的真实群ID）
+  async function joinEasemobGroup(groupId: string) {
     if (!isEasemobConnected.value) {
       console.error('❌ Easemob not connected')
       return
     }
+    if (!groupId) {
+      console.warn('⚠️ 无可用群ID，跳过加入环信群（群聊不可用，不影响游戏）')
+      return
+    }
 
     try {
-      const groupResult = await EasemobService.createOrJoinGroup(groupName, `Werewolf game room: ${roomId.value}`)
-      easemobGroupId.value = groupResult.groupId || groupResult.id
-      console.log('✅ Joined Easemob group:', easemobGroupId.value)
+      // 服务端已把玩家预添加为群成员，join失败（如已是成员）不阻塞
+      await EasemobService.joinGroup(groupId).catch((err: any) => {
+        console.warn('⚠️ 加入群组提示（可能已是成员）:', err?.message)
+      })
+      easemobGroupId.value = groupId
+      console.log('✅ Joined Easemob group:', groupId)
 
       // 监听群组消息
       EasemobService.onGroupMessage((message: any) => {
@@ -169,7 +191,8 @@ export const useGameStore = defineStore('game', () => {
     try {
       const res = await api.post('/api/rooms', {
         playerName: name,
-        avatar: avatar.value
+        avatar: avatar.value,
+        username: easemobUser.value
       })
       playerId.value = res.data.playerId
       playerName.value = name
@@ -179,10 +202,10 @@ export const useGameStore = defineStore('game', () => {
       // 获取环信token
       await getEasemobToken()
 
-      // 连接Easemob并加入群组
+      // 连接Easemob并加入群组（groupId为后端创建的真实群ID）
       try {
         await connectEasemob()
-        await joinEasemobGroup(`room_${roomId.value}`)
+        await joinEasemobGroup(chatGroupId.value)
       } catch (error) {
         console.warn('⚠️ Easemob connection optional, continuing with Socket.io only')
       }
@@ -201,7 +224,8 @@ export const useGameStore = defineStore('game', () => {
     try {
       const res = await api.post(`/api/rooms/${rid}/join`, {
         playerName: name,
-        avatar: avatar.value
+        avatar: avatar.value,
+        username: easemobUser.value
       })
       playerId.value = res.data.playerId
       playerName.value = name
@@ -211,10 +235,10 @@ export const useGameStore = defineStore('game', () => {
       // 获取环信token
       await getEasemobToken()
 
-      // 连接Easemob并加入群组
+      // 连接Easemob并加入群组（groupId为后端创建的真实群ID）
       try {
         await connectEasemob()
-        await joinEasemobGroup(`room_${roomId.value}`)
+        await joinEasemobGroup(chatGroupId.value)
       } catch (error) {
         console.warn('⚠️ Easemob connection optional, continuing with Socket.io only')
       }
@@ -249,18 +273,19 @@ export const useGameStore = defineStore('game', () => {
     }
   }
 
-  // 获取环信token
+  // 获取环信用户Token（服务端用App Token签发，免密，密码不出前端）
   async function getEasemobToken() {
     try {
       const res = await api.post('/api/easemob/token', {
         playerId: playerId.value,
         playerName: playerName.value,
-        username: easemobUser.value,
-        password: easemobPassword.value
+        username: easemobUser.value
       })
-      // 存储整个响应作为凭证信息
-      easemobToken.value = res.data
-      console.log('✅ Easemob token obtained:', res.data)
+      easemobAccessToken.value = res.data.accessToken
+      appKey.value = res.data.appKey
+      // 会话级缓存：刷新免重输密码，关浏览器即失效
+      sessionStorage.setItem('easemobAccessToken', easemobAccessToken.value)
+      console.log('✅ Easemob user token obtained')
       return res.data
     } catch (error) {
       console.error('获取环信token失败:', error)
@@ -294,12 +319,11 @@ export const useGameStore = defineStore('game', () => {
       })
     }
 
-    // ✅ 只清理房间数据，保留用户数据（这样Lobby能正常显示）
+    // ✅ 只清理房间数据，保留用户数据（这样Lobby能正常显示）；easemobAccessToken是用户级凭证，保留
     playerId.value = ''
     playerName.value = ''
     roomId.value = ''
     chatGroupId.value = ''
-    easemobToken.value = ''
     currentRoom.value = null
     playerList.value = []
     messages.value = []
@@ -336,9 +360,11 @@ export const useGameStore = defineStore('game', () => {
       console.log('玩家列表:', data.playerList)
       playerList.value = data.playerList
       currentRoom.value = {
+        ...currentRoom.value,
         roomId: data.roomId,
         playerCount: data.totalPlayers,
-        maxPlayers: data.maxPlayers
+        maxPlayers: data.maxPlayers,
+        hostPlayerId: data.hostPlayerId
       }
       console.log('✅ playerList已更新:', playerList.value.map((p: any) => p.name).join(', '))
     })
@@ -405,6 +431,52 @@ export const useGameStore = defineStore('game', () => {
     socket.on('error', (error: any) => {
       console.error('Socket 错误:', error)
     })
+
+    // 加入房间被拒绝（不在房间玩家列表中，如跳过HTTP入房直接进入）
+    socket.on('joinRoomFailed', (data: any) => {
+      console.warn('❌ 加入房间被拒绝:', data.reason)
+      messages.value.push({
+        type: 'system',
+        text: data.reason || '加入房间失败'
+      })
+      router.push('/lobby')
+    })
+
+    // 房主变更（转让）
+    socket.on('hostChanged', (data: any) => {
+      console.log('👑 房主变更为:', data.hostName)
+      if (currentRoom.value) {
+        currentRoom.value.hostPlayerId = data.hostPlayerId
+      }
+      messages.value.push({
+        type: 'system',
+        text: `👑 房主已转让给 ${data.hostName}`
+      })
+    })
+
+    // 被房主移出房间
+    socket.on('playerKicked', (data: any) => {
+      console.warn('🚫 被移出房间:', data.reason)
+      alert(data.reason || '你已被移出房间')
+      leaveRoom()
+      router.push('/lobby')
+    })
+
+    // 房间被房主解散
+    socket.on('roomDissolved', (data: any) => {
+      console.warn('💥 房间已解散:', data.reason)
+      alert(data.reason || '房间已解散')
+      leaveRoom()
+      router.push('/lobby')
+    })
+
+    // 房间设置更新
+    socket.on('roomSettingsUpdated', (data: any) => {
+      console.log('⚙️ 房间设置更新:', data.settings)
+      if (currentRoom.value) {
+        currentRoom.value.settings = data.settings
+      }
+    })
   }
 
   // 加入房间（通过 Socket）
@@ -420,7 +492,20 @@ export const useGameStore = defineStore('game', () => {
   }
 
   // 发送聊天消息
+  // 发送聊天消息：环信群聊为主，未连接环信时降级到Socket（不丢消息）
   function sendMessage(message: string) {
+    if (isEasemobConnected.value && easemobGroupId.value) {
+      sendEasemobMessage(message).catch((err) => {
+        console.warn('⚠️ 环信发送失败，降级Socket:', err)
+        sendSocketMessage(message)
+      })
+    } else {
+      sendSocketMessage(message)
+    }
+  }
+
+  // 通过Socket发送（游戏状态/降级通道）
+  function sendSocketMessage(message: string) {
     if (!socket || !roomId.value) return
     socket.emit('sendMessage', {
       roomId: roomId.value,
@@ -450,6 +535,37 @@ export const useGameStore = defineStore('game', () => {
     })
   }
 
+  // ===== 房主操作（仅房主可调，后端校验）=====
+
+  // 踢人
+  async function kickPlayer(targetPlayerId: string) {
+    if (!roomId.value || !playerId.value) return
+    const res = await api.post(`/api/rooms/${roomId.value}/kick`, {
+      playerId: playerId.value,
+      targetPlayerId
+    })
+    return res.data
+  }
+
+  // 转让房主
+  async function transferHost(targetPlayerId: string) {
+    if (!roomId.value || !playerId.value) return
+    const res = await api.post(`/api/rooms/${roomId.value}/transfer`, {
+      playerId: playerId.value,
+      targetPlayerId
+    })
+    return res.data
+  }
+
+  // 解散房间
+  async function dissolveRoom() {
+    if (!roomId.value || !playerId.value) return
+    const res = await api.post(`/api/rooms/${roomId.value}/dissolve`, {
+      playerId: playerId.value
+    })
+    return res.data
+  }
+
   return {
     // 用户信息
     userId,
@@ -457,16 +573,16 @@ export const useGameStore = defineStore('game', () => {
     nickname,
     avatar,
     easemobUser,
-    easemobPassword,
+    easemobAccessToken,
     appKey,
     isLoggedIn,
+    isHost,
 
     // 房间信息
     roomId,
     chatGroupId,
     currentRoom,
     rooms,
-    easemobToken,
     isInRoom,
     playerList,
     messages,
@@ -502,6 +618,11 @@ export const useGameStore = defineStore('game', () => {
     joinRoomSocket,
     sendMessage,
     sendSystemMessage,
-    swapSeat
+    swapSeat,
+
+    // 房主操作
+    kickPlayer,
+    transferHost,
+    dissolveRoom
   }
 })

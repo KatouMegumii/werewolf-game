@@ -128,12 +128,16 @@ npm run dev
 
 ### 房间管理
 - `GET /api/rooms` - 获取房间列表
-- `POST /api/rooms` - 创建房间
-- `GET /api/rooms/:roomId` - 获取房间信息
-- `POST /api/rooms/:roomId/join` - 加入房间
+- `POST /api/rooms` - 创建房间（自动创建环信私有群，返回真实群ID）
+- `GET /api/rooms/:roomId` - 获取房间信息（含房主、设置）
+- `POST /api/rooms/:roomId/join` - 加入房间（自动加入环信群）
+- `POST /api/rooms/:roomId/kick` - 踢人（仅房主）
+- `POST /api/rooms/:roomId/transfer` - 转让房主（仅房主）
+- `POST /api/rooms/:roomId/dissolve` - 解散房间（仅房主，解散环信群）
+- `PUT /api/rooms/:roomId/settings` - 更新房间设置（仅房主）
 
 ### Easemob集成
-- `POST /api/easemob/token` - 获取Easemob token
+- `POST /api/easemob/token` - 服务端签发环信用户Token（免密，密码不下发前端）
 
 ## 📝 环信配置
 
@@ -153,11 +157,15 @@ EASEMOB_APP_KEY=your_org_name#your_app_name
 
 ## 🎯 下一步开发方向
 
-- ⏳ 游戏房间实时状态管理（WebSocket）
+- ⏳ 游戏房间实时状态管理（发牌、日夜轮换等，Socket.io 已就位）
 - ⏳ 角色分配系统
 - ⏳ 游戏流程控制（白天/夜间轮换）
 - ⏳ 投票机制
-- ✅ 实时聊天集成 (Socket.io + Easemob IM)
+- ✅ 实时聊天集成（环信群组为主，Socket.io 降级/游戏状态用）
+- ✅ 房间生命周期（空房自动解散、断线30s重连缓冲）
+- ✅ 房主管理（踢人、转让、解散、设置）
+- ✅ 凭证安全（环信用户Token，密码不进 localStorage）
+- ⏳ 实时通话（二期，AgoraRTC）
 - ⏳ 游戏胜负判定
 - ⏳ 数据库集成（替代内存存储）
 

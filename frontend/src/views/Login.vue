@@ -148,7 +148,6 @@ const handleLoginUser = async () => {
       nickname: userNickname,
       avatar: avatar || '🧙',
       easemobUser: userId,
-      easemobPassword: loginPassword.value,
       appKey
     })
 
@@ -203,7 +202,6 @@ const handleRegister = async () => {
       nickname: nickname.value.trim(),
       avatar: avatar || '🧙',
       easemobUser: userId,
-      easemobPassword: password.value,
       appKey
     })
 

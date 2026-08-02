@@ -305,7 +305,8 @@ async function createRoom() {
     const res = await api.post('/api/rooms', {
       playerName: gameStore.nickname,
       avatar: gameStore.avatar,
-      boardId: boardId
+      boardId: boardId,
+      username: gameStore.easemobUser
     })
     const roomId = res.data.roomId
     const playerId = res.data.playerId
@@ -323,11 +324,11 @@ async function createRoom() {
     // 获取房间信息（包含maxPlayers）
     await gameStore.fetchRoomInfo()
 
-    // 初始化Socket和Easemob连接
+    // 初始化Socket和Easemob连接（群ID为后端创建的真实群ID）
     try {
       await gameStore.getEasemobToken()
       await gameStore.connectEasemob()
-      await gameStore.joinEasemobGroup(`room_${roomId}`)
+      await gameStore.joinEasemobGroup(chatGroupId)
     } catch (error) {
       console.warn('⚠️ Easemob连接可选，继续进入房间')
     }
@@ -383,7 +384,22 @@ async function goToRoom() {
     toast('没有最近的房间')
     return
   }
-  router.push(`/room/${lastRoomId.value}`)
+  // 先通过HTTP入房（刷新/重新进入时后端已无该玩家记录，必须先入房否则会变成"隐形玩家"）
+  try {
+    await gameStore.joinRoom(lastRoomId.value, gameStore.nickname)
+    router.push(`/room/${lastRoomId.value}`)
+  } catch (error: any) {
+    console.error('进入房间错误:', error);
+    const errorMsg = error?.response?.data?.error || error?.message || '进入房间失败'
+
+    if (errorMsg.includes('不存在')) {
+      toast('房间不存在或已关闭')
+      lastRoomId.value = ''
+      localStorage.removeItem('lastRoomId')
+    } else {
+      toast(errorMsg)
+    }
+  }
 }
 
 async function enterRoom(roomId: string) {

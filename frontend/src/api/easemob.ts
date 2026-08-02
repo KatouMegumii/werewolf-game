@@ -46,19 +46,19 @@ export function getEasemobClient() {
 }
 
 /**
- * 使用用户名和密码登录Easemob
+ * 使用用户Token登录Easemob（免密，推荐的安全登录方式）
  */
-export async function loginEasemob(username: string, password: string) {
+export async function loginEasemob(username: string, accessToken: string) {
   if (!client) {
     throw new Error('Easemob SDK not initialized')
   }
 
   try {
-    console.log(`🔐 登录Easemob: ${username}...`)
+    console.log(`🔐 登录Easemob: ${username} (token)...`)
 
     const result = await client.open({
       user: username,
-      pwd: password
+      accessToken
     })
 
     console.log('✅ Easemob login success:', result)
@@ -85,47 +85,7 @@ export async function logoutEasemob() {
 }
 
 /**
- * 创建或获取群组
- */
-export async function createOrJoinGroup(groupName: string, description?: string) {
-  if (!client) {
-    throw new Error('Easemob SDK not initialized')
-  }
-
-  try {
-    console.log(`📢 创建或加入群组: ${groupName}...`)
-
-    // 创建群组 (如果不存在会失败，但这是正常的)
-    const createResult = await client.Group.create({
-      name: groupName,
-      description: description || '',
-      members: [client.user],
-      public: false
-    }).catch(() => null)
-
-    if (createResult) {
-      console.log('✅ 群组创建成功:', createResult)
-      return createResult
-    }
-
-    // 如果创建失败，尝试获取群组列表中是否存在
-    const groups = await client.Group.getGroupsFromServer()
-    const existingGroup = groups?.data?.find((g: any) => g.name === groupName)
-
-    if (existingGroup) {
-      console.log('✅ 群组已存在:', existingGroup)
-      return existingGroup
-    }
-
-    throw new Error(`Failed to create or find group: ${groupName}`)
-  } catch (error) {
-    console.error('❌ Create/join group failed:', error)
-    throw error
-  }
-}
-
-/**
- * 加入群组
+ * 加入群组（群由服务端通过REST创建并预添加成员，这里用真实groupId加入）
  */
 export async function joinGroup(groupId: string) {
   if (!client) {
