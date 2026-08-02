@@ -8,11 +8,14 @@ import router from '../router'
 
 export const useGameStore = defineStore('game', () => {
   // 用户信息
-  const userId = ref<string>(localStorage.getItem('userId') || '')
-  const username = ref<string>(localStorage.getItem('username') || '')
+  // 环信用户名统一小写:users 实体强制小写但 metadata 大小写敏感,
+  // 历史版本可能在 localStorage 存了大写 username(旧会话未重新登录),
+  // 这里初始化即规范化,后续建房/入房/换头像/token 全部使用小写真实名
+  const userId = ref<string>((localStorage.getItem('userId') || '').toLowerCase())
+  const username = ref<string>((localStorage.getItem('username') || '').toLowerCase())
   const nickname = ref<string>(localStorage.getItem('nickname') || '')
   const avatar = ref<string>(localStorage.getItem('avatar') || '🧙')
-  const easemobUser = ref<string>(localStorage.getItem('easemobUser') || '')
+  const easemobUser = ref<string>((localStorage.getItem('easemobUser') || '').toLowerCase())
   const appKey = ref<string>(localStorage.getItem('appKey') || '')
   // 环信用户Token：只存内存 + sessionStorage（刷新免重输密码，关浏览器即失效），密码永不落盘
   const easemobAccessToken = ref<string>(sessionStorage.getItem('easemobAccessToken') || '')
@@ -42,12 +45,13 @@ export const useGameStore = defineStore('game', () => {
   const isHost = computed(() => !!currentRoom.value?.hostPlayerId && currentRoom.value.hostPlayerId === playerId.value)
 
   // 设置当前用户（密码不再进入前端存储；环信凭证由后端签发token）
+  // 环信用户名统一小写落盘(users实体强制小写、metadata大小写敏感,混用会读写分裂)
   function setCurrentUser(user: any) {
-    userId.value = user.userId
-    username.value = user.username
+    userId.value = String(user.userId || '').toLowerCase()
+    username.value = String(user.username || '').toLowerCase()
     nickname.value = user.nickname
     avatar.value = user.avatar || '🧙'
-    easemobUser.value = user.easemobUser || user.username
+    easemobUser.value = String(user.easemobUser || user.username || '').toLowerCase()
     appKey.value = user.appKey
 
     // 登录响应若带回token则直接使用（进入房间时也会经 /api/easemob/token 重新签发）
@@ -56,11 +60,11 @@ export const useGameStore = defineStore('game', () => {
       sessionStorage.setItem('easemobAccessToken', user.accessToken)
     }
 
-    localStorage.setItem('userId', user.userId)
-    localStorage.setItem('username', user.username)
+    localStorage.setItem('userId', userId.value)
+    localStorage.setItem('username', username.value)
     localStorage.setItem('nickname', user.nickname)
     localStorage.setItem('avatar', user.avatar || '🧙')
-    localStorage.setItem('easemobUser', user.easemobUser || user.username)
+    localStorage.setItem('easemobUser', easemobUser.value)
     localStorage.setItem('appKey', user.appKey)
     // 迁移：清理历史遗留的明文密码
     localStorage.removeItem('easemobPassword')

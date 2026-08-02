@@ -68,6 +68,32 @@ async function getAppToken() {
   return appTokenCache.token;
 }
 
+// 环信真实用户名缓存: 输入大小写 -> 环信存储的真实名(小写)
+const usernameAliasCache = new Map();
+
+/**
+ * 规范化环信用户名: users GET 大小写不敏感,但 metadata 存储/读取大小写敏感。
+ * 历史上 localStorage 可能存有大写 username(旧版本登录/未重新登录的会话),
+ * 必须统一换成环信真实小写名再读写,否则 metadata 会读写到大小写分裂的错误记录。
+ * 查不到时原样返回(环信侧会 404,不会写错记录)。
+ */
+async function normalizeEasemobUsername(username) {
+  if (!username) return username;
+  if (usernameAliasCache.has(username)) return usernameAliasCache.get(username);
+  try {
+    const appToken = await getAppToken();
+    const res = await axios.get(
+      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/users/${username}`,
+      { headers: { 'Authorization': `Bearer ${appToken}` } }
+    );
+    const real = res.data?.entities?.[0]?.username || username;
+    usernameAliasCache.set(username, real);
+    return real;
+  } catch (err) {
+    return username;
+  }
+}
+
 // 创建私有群（群主=owner），返回真实 groupId
 async function createEasemobGroup(owner, name, description) {
   const appToken = await getAppToken();
@@ -376,10 +402,15 @@ app.post('/api/auth/login', async (req, res) => {
  * 创建房间
  */
 app.post('/api/rooms', async (req, res) => {
-  const { playerName, avatar, boardId, username } = req.body;
+  let { playerName, avatar, boardId, username } = req.body;
 
   if (!playerName) {
     return res.status(400).json({ error: '玩家名称不能为空' });
+  }
+
+  // 环信用户名规范化:群主/成员管理必须用真实小写名(metadata/users 大小写行为不一致)
+  if (username) {
+    username = await normalizeEasemobUsername(username);
   }
 
   // 检查玩家是否已经在其他房间中
@@ -487,10 +518,15 @@ app.post('/api/rooms', async (req, res) => {
  */
 app.post('/api/rooms/:roomId/join', async (req, res) => {
   const { roomId } = req.params;
-  const { playerName, avatar, username } = req.body;
+  let { playerName, avatar, username } = req.body;
 
   if (!playerName) {
     return res.status(400).json({ error: '玩家名称不能为空' });
+  }
+
+  // 环信用户名规范化:群成员管理必须用真实小写名
+  if (username) {
+    username = await normalizeEasemobUsername(username);
   }
 
   // 检查玩家是否已经在其他房间中
@@ -793,13 +829,17 @@ app.get('/api/rooms', (req, res) => {
  * 更新用户属性
  */
 app.put('/api/auth/user/:username', async (req, res) => {
-  const { username } = req.params;
+  let { username } = req.params;
   const { nickname, avatar } = req.body;
 
   try {
+    // 真实用户名规范化:前端可能传历史 localStorage 存的大写 username
+    // (users GET 大小写不敏感、metadata 敏感——不规范化会读写到分裂的错误记录)
+    username = await normalizeEasemobUsername(username);
+
     // 获取App Token
     const appTokenRes = await axios.post(
-      'http://ngi-a1.easemob.com/1196260703193552/langrensha/token',
+      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/token`,
       {
         grant_type: 'client_credentials',
         client_id: EASEMOB_CONFIG.clientId,
@@ -921,13 +961,15 @@ app.put('/api/auth/user/:username', async (req, res) => {
  * 密码不再下发到前端，前端也不再存储密码
  */
 app.post('/api/easemob/token', async (req, res) => {
-  const { playerId, playerName, username } = req.body;
+  let { playerId, playerName, username } = req.body;
 
   if (!username) {
     return res.status(400).json({ error: '缺少Easemob用户名' });
   }
 
   try {
+    // 真实用户名规范化:兼容历史 localStorage 里存的大写 easemobUser
+    username = await normalizeEasemobUsername(username);
     console.log(`✅ 为玩家 ${playerName} (${username}) 签发Easemob Token`);
 
     // 第1步: 获取App Token
