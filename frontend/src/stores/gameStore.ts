@@ -157,10 +157,11 @@ export const useGameStore = defineStore('game', () => {
       easemobGroupId.value = groupId
       console.log('✅ Easemob group ready:', groupId)
 
-      // 监听群组消息（双通道消息统一走pushMessage去重；from是环信用户名,映射回房间内昵称）
+      // 监听群组消息（双通道消息统一走pushMessage去重；from是环信用户名(小写),映射回房间内昵称）
       EasemobService.onGroupMessage((message: any) => {
         const fromUser = message.from
-        const displayName = playerList.value.find(p => p.easemobUser === fromUser)?.name || fromUser
+        // 环信消息from是小写用户名,与注册时的easemobUser大小写可能不同,比较时忽略大小写
+        const displayName = playerList.value.find(p => p.easemobUser?.toLowerCase() === fromUser?.toLowerCase())?.name || fromUser
         pushMessage({
           type: 'easemob',
           from: displayName,
