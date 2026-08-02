@@ -114,9 +114,13 @@ async function removeEasemobGroupMember(groupId, username) {
   }
 }
 
-// 解散群组
+// 解散失败的环信群ID集合：由30s清扫循环兜底重试，直到成功或群已不存在（网络抖动/App Token刷新失败等不再永久泄漏）
+const pendingGroupDestroys = new Set();
+
+// 解散群组（失败进入重试队列，不阻塞调用方）
 async function destroyEasemobGroup(groupId) {
   if (!groupId) return;
+  if (pendingGroupDestroys.has(groupId)) return; // 已在重试队列，避免并发重复删除
   try {
     const appToken = await getAppToken();
     await axios.delete(
@@ -125,7 +129,13 @@ async function destroyEasemobGroup(groupId) {
     );
     console.log(`🗑️ 环信群 ${groupId} 已解散`);
   } catch (err) {
-    console.warn(`⚠️ 解散环信群 ${groupId} 失败:`, err.response?.status, err.response?.data?.error || err.message);
+    if (err.response?.status === 404) {
+      // 群已不存在（可能此前已解散成功），视为完成，幂等
+      console.log(`🗑️ 环信群 ${groupId} 不存在（已解散），跳过`);
+      return;
+    }
+    console.warn(`⚠️ 解散环信群 ${groupId} 失败(将进入重试队列，30s清扫兜底):`, err.response?.status, err.response?.data?.error || err.message);
+    pendingGroupDestroys.add(groupId);
   }
 }
 
@@ -1014,8 +1024,9 @@ function removePlayerFromRoom(roomId, playerId, playerName) {
     console.log(`👑 房主 ${playerName} 已离开，房主自动转移给 ${newHost.name}（座位${newHost.seatNumber}）`);
   }
 
-  // 房间还有其他人，把离开的玩家移出环信群（群主不移除——环信禁止移除群主，群主身份保留到群解散）
-  if (player?.easemobUser && room.easemobGroupId && player.easemobUser !== room.hostEasemobUser) {
+  // 房间还有其他人，把离开的玩家移出环信群（群主不移除——环信禁止移除群主，群主身份保留到群解散；
+  // 房间已空时群已在上面解散，不要再对已删群做成员移除，避免404噪音）
+  if (room.players.length > 0 && player?.easemobUser && room.easemobGroupId && player.easemobUser !== room.hostEasemobUser) {
     removeEasemobGroupMember(room.easemobGroupId, player.easemobUser);
   }
 }
@@ -1046,15 +1057,24 @@ function cancelPlayerRemoval(playerId) {
   }
 }
 
-// 定时清扫：清理 rooms/players 中的数据不一致（防御，正常情况下不该触发）
+// 定时清扫（30s）：清理 rooms/players 中的数据不一致（防御，正常情况下不该触发），
+// 并兜底重试解散失败的环信群
 setInterval(() => {
   for (const [roomId, room] of rooms.entries()) {
-    const before = room.players.length;
     room.players = room.players.filter(pid => players.has(pid));
-    if (room.players.length === 0 && before > 0) {
+    if (room.players.length === 0) {
+      // 空房/孤儿房都清掉（不留 before>0 死角：已是空房的房间永远等不到清扫）
       rooms.delete(roomId);
       console.log(`🧹 清扫：孤儿房间 ${roomId} 已删除`);
+      // 关键：删房必须同步解散环信群，否则群会在环信后台永久残留
+      destroyEasemobGroup(room.easemobGroupId);
     }
+  }
+  // 重试解散失败的环信群（网络抖动/App Token刷新失败等补偿）
+  if (pendingGroupDestroys.size > 0) {
+    const retrying = [...pendingGroupDestroys];
+    pendingGroupDestroys.clear();
+    retrying.forEach(id => destroyEasemobGroup(id));
   }
 }, 30_000);
 
@@ -1351,9 +1371,66 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date() });
 });
 
+/**
+ * 启动清扫（修复重启泄漏）：房间数据全在内存，进程重启后所有房间消失，
+ * 但环信群是持久化的——若不清扫，每次重启（deploy.sh / pm2 restart）都会在环信后台残留一批孤儿群。
+ * 本应用创建的群名统一为 room_{6位房间号}，只解散这种前缀的群，避免误删共用appkey的其他群。
+ * 仅在生产实例（pm2 环境）执行；本地 npm run dev 不触发（否则本地启动会误删线上群）。
+ * 逃生开关：EASEMOB_STARTUP_SWEEP=0 可禁用。
+ */
+async function snapshotEasemobGroups() {
+  const appToken = await getAppToken();
+  const groups = [];
+  let cursor = '';
+  do {
+    const params = cursor ? { limit: 100, cursor } : { limit: 100 };
+    const res = await axios.get(
+      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/chatgroups`,
+      { headers: { 'Authorization': `Bearer ${appToken}` }, params, timeout: 15_000 }
+    );
+    groups.push(...(res.data?.data || []));
+    cursor = res.data?.cursor || '';
+  } while (cursor && groups.length < 10000); // 防御上限，正常场景群数量远小于此
+  return groups;
+}
+
+function sweepOrphanEasemobGroups(groups) {
+  // 群列表接口返回 groupname 字段；只解散本应用创建的房间群
+  const orphans = groups.filter(g => /^room_\d{6}$/.test(g.groupname || ''));
+  if (!orphans.length) {
+    console.log('🧹 启动清扫：无遗留环信群');
+    return;
+  }
+  console.log(`🧹 启动清扫：发现 ${orphans.length} 个遗留环信群（共${groups.length}个），开始解散...`);
+  orphans.forEach(g => destroyEasemobGroup(g.groupid));
+}
+
+async function bootstrap() {
+  // 启动清扫是否启用：生产(pm2环境)默认开，本地dev默认关，EASEMOB_STARTUP_SWEEP=0 强制关
+  const startupSweepEnabled = process.env.EASEMOB_STARTUP_SWEEP !== '0'
+    && (process.env.PM2_HOME || process.env.NODE_APP_INSTANCE !== undefined);
+
+  let orphanSnapshot = [];
+  if (startupSweepEnabled) {
+    try {
+      // 先取群快照再监听：快照之后的房间是"活着"的新群，不能被启动清扫误删
+      orphanSnapshot = await snapshotEasemobGroups();
+    } catch (err) {
+      console.warn('⚠️ 启动清扫：获取环信群列表失败，跳过（下次重启会重试）:', err.message);
+    }
+  }
+
+  httpServer.listen(PORT, () => {
+    console.log(`🎮 Werewolf Game Server running on http://localhost:${PORT}`);
+    console.log(`📱 API ready for frontend connection`);
+    console.log(`🔌 WebSocket ready for real-time communication`);
+  });
+
+  // 监听后异步解散遗留群（失败自动进重试队列，不阻塞启动）
+  if (orphanSnapshot.length > 0) {
+    sweepOrphanEasemobGroups(orphanSnapshot);
+  }
+}
+
 const PORT = process.env.PORT || 3000;
-httpServer.listen(PORT, () => {
-  console.log(`🎮 Werewolf Game Server running on http://localhost:${PORT}`);
-  console.log(`📱 API ready for frontend connection`);
-  console.log(`🔌 WebSocket ready for real-time communication`);
-});
+bootstrap();

@@ -6,7 +6,8 @@ H5 在线狼人杀游戏平台:Vue 3 + TS 前端,Express + Socket.io 后端,环�
 
 - `backend/` — Express + Socket.io(`server.js` 约 1300 行),PostgreSQL(`db.js`,boards 表),环信 REST 集成
 - `frontend/` — Vue 3 + Pinia + Vite,页面:`Login` / `Lobby`(大厅) / `Config`(板子配置) / `Room`(游戏房间)
-- 部署:后端 pm2(`werewolf-backend`),前端 Nginx 服务 `frontend/dist`(配置模板在 `deploy/nginx-werewolf.conf`),发布用 `./deploy.sh`(拉取+装依赖+重启后端+build 前端)
+- 部署(云服务器 `/root/werewolf-game`,需先 `chmod o+x /root` 否则 Nginx 500):后端 pm2(`werewolf-backend`),前端 Nginx 服务 `frontend/dist`(配置模板在 `deploy/nginx-werewolf.conf`),发布 = 服务器上执行 `./deploy.sh`:`git pull`(网络不稳重试一次)→ 后端 `npm install` + `pm2 restart werewolf-backend`(无则 `pm2 start server.js --name "werewolf-backend"`)→ 前端 `npm install` + `npm run build`
+- **注意:每次发布都会 pm2 重启后端 → 内存房间全部丢失**(房间数据在内存,重启后不可恢复),遗留环信群靠启动清扫自动解散(见心得 11)
 - 线上地址:http://langrensha.jxjhlrs.fun(https 未配;`backend/.env` 有环信凭证,勿提交——已在 .gitignore)
 
 ## 架构要点(当前实现)
@@ -16,7 +17,7 @@ H5 在线狼人杀游戏平台:Vue 3 + TS 前端,Express + Socket.io 后端,环�
 - **座位**:`findAvailableSeat` 分配**第一个空闲座位**(不能 room.players.length+1,会与换座玩家撞号)
 - **环信集成(重点)**:
   - 登录:后端 `/api/easemob/token` 用 App Token + `grant_type: inherit` 签发用户 token(免密);前端 `open({user, accessToken})`,token 只存内存+sessionStorage,**密码永不落前端**
-  - 群管理:后端 REST 建群/加成员/移除/解散;`room.hostEasemobUser` 是环信群主,**群主不进不参与成员管理**(环信禁止移除群主)
+  - 群管理:后端 REST 建群/加成员/移除/解散;`room.hostEasemobUser` 是环信群主,**群主不进不参与成员管理**(环信禁止移除群主);**群随房间销毁**:房主解散/最后一人离房/孤儿清扫都调 `destroyEasemobGroup`,失败进 `pendingGroupDestroys` 队列由 30s 清扫兜底重试(404 幂等)
   - **聊天(关键架构)**:发送走**后端 REST 代理**(`POST /api/rooms/:id/message` → 环信 REST `POST /messages`),接收走 **SDK `onTextMessage`**。**不要用 SDK `conn.send` 发群消息**(见心得)。双通道(socket.io 兜底)统一 `pushMessage` 去重(2s 同发送者同内容)
 - **凭证安全**:登录/注册后环信 user token 由后端签发,前端 sessionStorage 缓存,关浏览器失效
 
@@ -35,6 +36,7 @@ H5 在线狼人杀游戏平台:Vue 3 + TS 前端,Express + Socket.io 后端,环�
 8. **阿里云 ECS 直连 GitHub 间歇性不通**:git pull 会无限挂起(光标闪烁无输出)。`curl -m 10 -I https://github.com` 先测;不通时换 ssh 协议/走代理/或本地打包 scp 上传
 9. **房主离开后环信群成员管理**:App Token 不能移除环信群主(403 forbidden_op),群主身份保留到群解散——设计上群主进出房间跳过成员管理
 10. **板子座位数**:`roles` 是 `[{key,name,count}]` 数组,**座位数 = 各角色 count 之和**,不是 roles.length
+11. **环信群生命周期必须与房间删除绑定,否则环信后台残留群**:房间数据全在内存、环信群在环信服务器持久化,两者不对称。曾有三处泄漏:① 进程重启(pm2/deploy.sh)内存房间全丢,群永久残留(**最大泄漏源**,每次发布就批量残留);② 30s 孤儿清扫删房不删群;③ `destroyEasemobGroup` 失败仅 warn 无重试。修复:删房必删群(含孤儿清扫,去掉空房死角);删群失败进 `pendingGroupDestroys` 重试队列,30s 清扫兜底(404 幂等);**启动清扫**:仅 pm2 生产环境触发,群名统一 `room_{6位房间号}` 前缀过滤(避免误删共用 appkey 的其他群),**先取群快照再 listen**(避免误删新群),`EASEMOB_STARTUP_SWEEP=0` 可禁用,本地 npm run dev 不触发
 
 ## 后续开发指导
 
@@ -57,4 +59,4 @@ H5 在线狼人杀游戏平台:Vue 3 + TS 前端,Express + Socket.io 后端,环�
 - `frontend/src/api/easemob.ts` — SDK 封装:token 登录、群消息收发(onTextMessage)、消息 create
 - `frontend/src/views/Room.vue` — 房间 UI:座位区(renderTick 强制重建)、聊天、设置面板
 - `deploy/nginx-werewolf.conf` — Nginx 生产配置(含 /socket.io/ Upgrade 反代)
-- `deploy.sh` — 一键发布
+- `deploy.sh` — 一键发布(云服务器执行;git pull→重启后端→build 前端;**重启会丢全部房间**,遗留环信群由启动清扫解散)
