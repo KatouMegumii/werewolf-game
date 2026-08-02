@@ -422,6 +422,7 @@ app.post('/api/rooms', async (req, res) => {
     boardId: boardId || 'default',
     boardName,
     hostPlayerId: playerId,
+    hostEasemobUser: username || playerName, // 环信群主(群主天然在群里,进出不触发成员管理)
     settings: {},
     gameState: {}
   };
@@ -511,8 +512,8 @@ app.post('/api/rooms/:roomId/join', async (req, res) => {
     room.players.push(playerId);
     players.set(playerId, player);
 
-    // 把新玩家拉进环信群（异步，失败不阻塞入房）
-    if (room.easemobGroupId && player.easemobUser) {
+    // 把新玩家拉进环信群（异步，失败不阻塞入房）；群主天然在群里，跳过
+    if (room.easemobGroupId && player.easemobUser && player.easemobUser !== room.hostEasemobUser) {
       addEasemobGroupMember(room.easemobGroupId, player.easemobUser)
         .then(() => console.log(`✅ 玩家 ${playerName} 已加入环信群 ${room.easemobGroupId}`))
         .catch(err => console.warn(`⚠️ 添加群成员失败:`, err.response?.status, JSON.stringify(err.response?.data) || err.message));
@@ -938,8 +939,8 @@ function removePlayerFromRoom(roomId, playerId, playerName) {
     console.log(`🗑️ 空房间 ${roomId} 已删除`);
     // 房间解散，同步解散环信群（失败仅warn，不阻塞）
     destroyEasemobGroup(room.easemobGroupId);
-  } else if (player?.easemobUser && room.easemobGroupId) {
-    // 房间还有其他人，把离开的玩家移出群（非房主离开）
+  } else if (player?.easemobUser && room.easemobGroupId && player.easemobUser !== room.hostEasemobUser) {
+    // 房间还有其他人，把离开的玩家移出群（群主不移除——环信禁止移除群主，群主身份保留到群解散）
     removeEasemobGroupMember(room.easemobGroupId, player.easemobUser);
   }
 }
