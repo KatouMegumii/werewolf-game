@@ -169,6 +169,12 @@ export async function leaveGroup(groupId: string) {
     throw new Error('Easemob SDK not initialized')
   }
 
+  // SDK关闭后Group模块可能已不存在,直接跳过(退出房间时SDK可能已close)
+  if (!client.Group?.leaveGroup) {
+    console.warn('⚠️ SDK已关闭，跳过离开群组')
+    return
+  }
+
   try {
     console.log(`👋 离开群组: ${groupId}...`)
 

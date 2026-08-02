@@ -121,18 +121,22 @@ export const useGameStore = defineStore('game', () => {
     }
   }
 
-  // 断开Easemob连接
+  // 断开Easemob连接（leaveGroup失败不阻断logout，避免SDK半死状态/重复登录208）
   async function disconnectEasemob() {
     try {
       if (easemobGroupId.value) {
-        await EasemobService.leaveGroup(easemobGroupId.value)
+        await EasemobService.leaveGroup(easemobGroupId.value).catch(err => {
+          console.warn('⚠️ 离开群组失败(忽略):', err?.message)
+        })
       }
       await EasemobService.logoutEasemob()
       isEasemobConnected.value = false
       easemobGroupId.value = ''
       console.log('✅ Easemob disconnected')
     } catch (error) {
-      console.error('⚠️ Error disconnecting Easemob:', error)
+      console.warn('⚠️ Error disconnecting Easemob:', error?.message || error)
+      isEasemobConnected.value = false
+      easemobGroupId.value = ''
     }
   }
 

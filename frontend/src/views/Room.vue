@@ -213,6 +213,16 @@ onMounted(async () => {
   gameStore.initSocket()
   await nextTick()
   gameStore.joinRoomSocket(roomId.value)
+
+  // 防御兜底:1.5s后若玩家列表仍无自己(joinRoomSuccess可能丢失/渲染异常),自动重新入房
+  setTimeout(() => {
+    const me = gameStore.playerList.find(p => p.playerId === gameStore.playerId)
+    if (!me && gameStore.roomId) {
+      console.warn('⚠️ 1.5s后仍未在玩家列表中，自动重新joinRoom')
+      gameStore.joinRoomSocket(roomId.value)
+      gameStore.fetchRoomInfo()
+    }
+  }, 1500)
 })
 
 // 监听消息变化，自动滚动到底
