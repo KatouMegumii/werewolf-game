@@ -136,7 +136,7 @@ const handleLoginUser = async () => {
 
   try {
     const res = await api.post('/api/auth/login', {
-      username: loginUsername.value.trim(),
+      username: loginUsername.value.trim().toLowerCase(),
       password: loginPassword.value
     })
 
@@ -144,7 +144,7 @@ const handleLoginUser = async () => {
 
     gameStore.setCurrentUser({
       userId,
-      username: loginUsername.value.trim(),
+      username: loginUsername.value.trim().toLowerCase(),
       nickname: userNickname,
       avatar: avatar || '🧙',
       easemobUser: userId,
@@ -189,7 +189,7 @@ const handleRegister = async () => {
 
   try {
     const res = await api.post('/api/auth/register', {
-      username: username.value.trim(),
+      username: username.value.trim().toLowerCase(),
       nickname: nickname.value.trim(),
       password: password.value
     })
@@ -198,7 +198,7 @@ const handleRegister = async () => {
 
     gameStore.setCurrentUser({
       userId,
-      username: username.value.trim(),
+      username: username.value.trim().toLowerCase(),
       nickname: nickname.value.trim(),
       avatar: avatar || '🧙',
       easemobUser: userId,

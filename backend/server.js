@@ -145,7 +145,11 @@ async function destroyEasemobGroup(groupId) {
  * 用户注册 - 通过REST API在环信创建新用户
  */
 app.post('/api/auth/register', async (req, res) => {
-  const { username, nickname, password } = req.body;
+  // 用户名统一小写：环信 users 实体创建时强制小写、metadata 却大小写敏感，
+  // 若注册时保留输入大小写，metadata 会被劈成大小写两条记录(登录读大写旧值、修改写小写 → 永远"保存后回退")。
+  // 新用户一律小写，与环信真实用户名对齐
+  const username = String(req.body.username || '').toLowerCase();
+  const { nickname, password } = req.body;
 
   if (!username || !password || !nickname) {
     return res.status(400).json({ error: '用户名、昵称和密码不能为空' });
@@ -260,8 +264,26 @@ app.post('/api/auth/login', async (req, res) => {
     const appToken = appTokenRes.data.access_token;
     console.log('✅ App token obtained');
 
-    // 第2步: 验证用户凭证 - 通过获取用户信息来验证
-    console.log(`验证用户: ${username}...`);
+    // 第2步: 验证用户密码(环信标准方式:grant_type=password 换用户token,密码错误返回 400/401)
+    // 修复安全漏洞:此前只 GET /users 查存在性,任意密码都能登录
+    console.log(`验证用户密码: ${username}...`);
+    try {
+      await axios.post(
+        `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/token`,
+        { grant_type: 'password', username, password }
+      );
+      console.log('✅ 密码验证通过');
+    } catch (err) {
+      console.warn('❌ 密码验证失败:', err.response?.status, err.response?.data?.error_description || err.message);
+      return res.status(401).json({
+        error: '密码错误或用户不存在',
+        details: err.response?.data
+      });
+    }
+
+    // 第3步: 获取环信真实用户名——users 实体创建时强制小写、GET 大小写不敏感,
+    // 但 metadata 存储/读取是大小写敏感的(曾把 testplayer1 与 Testplayer1 劈成两条记录,
+    // 导致换头像/昵称"保存成功但重新登录回退")。此后所有读写一律用真实用户名
     const userRes = await axios.get(
       `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/users/${username}`,
       {
@@ -271,17 +293,17 @@ app.post('/api/auth/login', async (req, res) => {
         }
       }
     );
+    const realUsername = userRes.data?.entities?.[0]?.username || username;
+    console.log('✅ 用户验证通过, 真实用户名:', realUsername);
 
-    console.log('✅ User verified');
-
-    // 第3步: 获取用户属性（可选的，失败不影响登录）
-    let userNickname = username;
+    // 第4步: 获取用户属性（可选的，失败不影响登录）
+    let userNickname = realUsername;
     let userAvatar = '🧙';
 
     try {
-      // 从环信获取用户属性（使用metadata API）
+      // 从环信获取用户属性（使用metadata API）——用真实用户名读取，避免大小写分裂
       const attrRes = await axios.get(
-        `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/metadata/user/${username}`,
+        `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/metadata/user/${realUsername}`,
         {
           headers: {
             'Authorization': `Bearer ${appToken}`,
@@ -324,12 +346,12 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     res.json({
-      userId: username,
-      username: username,
+      userId: realUsername,
+      username: realUsername,
       nickname: userNickname,
       avatar: userAvatar,
       appKey: EASEMOB_CONFIG.appKey,
-      easemobUser: username,
+      easemobUser: realUsername,
       easemobPassword: password,
       message: '登录成功'
     });
