@@ -86,6 +86,7 @@ export async function logoutEasemob() {
 
 /**
  * 加入群组（群由服务端通过REST创建并预添加成员，这里用真实groupId加入）
+ * SDK 4.24: 群API直接挂在connection实例上(client.joinGroup)，不再通过client.Group
  */
 export async function joinGroup(groupId: string) {
   if (!client) {
@@ -95,7 +96,7 @@ export async function joinGroup(groupId: string) {
   try {
     console.log(`👋 加入群组: ${groupId}...`)
 
-    const result = await client.Group.joinGroup({
+    const result = await client.joinGroup({
       groupId: groupId,
       message: 'Request to join'
     })
@@ -121,7 +122,9 @@ export async function sendGroupMessage(
   }
 
   try {
-    const message = new WebIM.message('txt', {
+    // SDK 4.24: 用 WebIM.message.create 创建消息(不再是 new WebIM.message)
+    const message = WebIM.message.create({
+      type: 'txt',
       msg: content,
       to: groupId,
       chatType: 'groupChat',
@@ -169,8 +172,8 @@ export async function leaveGroup(groupId: string) {
     throw new Error('Easemob SDK not initialized')
   }
 
-  // SDK关闭后Group模块可能已不存在,直接跳过(退出房间时SDK可能已close)
-  if (!client.Group?.leaveGroup) {
+  // SDK 4.24: 群API直接挂在connection上;SDK关闭后可能不存在,跳过(退出房间时SDK可能已close)
+  if (typeof client.leaveGroup !== 'function') {
     console.warn('⚠️ SDK已关闭，跳过离开群组')
     return
   }
@@ -178,7 +181,7 @@ export async function leaveGroup(groupId: string) {
   try {
     console.log(`👋 离开群组: ${groupId}...`)
 
-    const result = await client.Group.leaveGroup({
+    const result = await client.leaveGroup({
       groupId: groupId
     })
 
