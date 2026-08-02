@@ -364,12 +364,35 @@ app.post('/api/rooms', async (req, res) => {
   const playerId = uuidv4();
   const groupName = `room_${newRoomId}`;
 
-  // 根据boardId确定房间人数
-  const boardConfig = {
-    1: { maxPlayers: 12, name: '12人经典配置' },
-    2: { maxPlayers: 10, name: '10人精简配置' }
-  };
-  const board = boardConfig[boardId] || { maxPlayers: 12, name: '默认配置' };
+  // 根据boardId确定房间人数（优先从数据库读板子的角色数，保证座位数与角色数一致）
+  let maxPlayers = 12;
+  let boardName = '默认配置';
+  if (boardId) {
+    try {
+      const db = getDb();
+      const boardRes = await db.query('SELECT name, roles FROM boards WHERE id = $1', [boardId]);
+      if (boardRes.rows[0]) {
+        boardName = boardRes.rows[0].name;
+        const roles = JSON.parse(boardRes.rows[0].roles);
+        if (Array.isArray(roles) && roles.length > 0) {
+          maxPlayers = roles.length;
+        }
+      } else {
+        // 数据库没有该板子，回退到内置配置
+        const boardConfig = {
+          1: { maxPlayers: 12, name: '12人经典配置' },
+          2: { maxPlayers: 10, name: '10人精简配置' }
+        };
+        const fallback = boardConfig[boardId];
+        if (fallback) {
+          maxPlayers = fallback.maxPlayers;
+          boardName = fallback.name;
+        }
+      }
+    } catch (err) {
+      console.warn('⚠️ 读取板子配置失败，使用默认人数:', err.message);
+    }
+  }
 
   // 创建环信私有群（群主=房主的环信用户名）；失败不阻塞建房，群聊降级为不可用
   let easemobGroupId = '';
@@ -387,9 +410,9 @@ app.post('/api/rooms', async (req, res) => {
     createdAt: new Date(),
     players: [playerId],
     status: 'waiting', // waiting, gaming, ended
-    maxPlayers: board.maxPlayers,
+    maxPlayers,
     boardId: boardId || 'default',
-    boardName: board.name,
+    boardName,
     hostPlayerId: playerId,
     settings: {},
     gameState: {}
@@ -1107,7 +1130,7 @@ io.on('connection', (socket) => {
   });
 
   // 玩家离开房间（主动离开，不缓冲，直接移除）
-  socket.on('leaveRoom', (data) => {
+  socket.on('leaveRoom', (data, callback) => {
     const { roomId, playerId, playerName } = data;
     const socketInfo = socketToPlayer.get(socket.id);
 
@@ -1136,6 +1159,11 @@ io.on('connection', (socket) => {
     socket.leave(actualRoomId);
 
     removePlayerFromRoom(actualRoomId, actualPlayerId, actualPlayerName);
+
+    // ack通知前端已处理完成（前端据此断开连接，避免emit后立即断开丢包）
+    if (typeof callback === 'function') {
+      callback({ ok: true });
+    }
   });
 
   // 玩家断连处理（断线缓冲30s，期间重连则恢复）
