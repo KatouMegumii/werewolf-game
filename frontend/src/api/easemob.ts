@@ -141,7 +141,7 @@ export async function sendGroupMessage(
 }
 
 /**
- * 监听群组消息
+ * 监听群组消息（SDK 4.24: 回调名为 onTextMessage/onImageMessage，不再是 onTxtMsg/onImageMsg）
  */
 export function onGroupMessage(callback: (message: any) => void) {
   if (!client) {
@@ -149,13 +149,13 @@ export function onGroupMessage(callback: (message: any) => void) {
   }
 
   client.addEventHandler('messageHandler', {
-    onTxtMsg: (message: any) => {
+    onTextMessage: (message: any) => {
       if (message.chatType === 'groupChat') {
         console.log('📨 Received group message:', message)
         callback(message)
       }
     },
-    onImageMsg: (message: any) => {
+    onImageMessage: (message: any) => {
       if (message.chatType === 'groupChat') {
         console.log('🖼️ Received group image:', message)
         callback(message)

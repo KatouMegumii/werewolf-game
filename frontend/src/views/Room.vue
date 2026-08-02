@@ -21,7 +21,7 @@
     <div class="room-stage">
       <!-- 左侧玩家座位 -->
       <div class="side-seats" aria-label="左侧玩家">
-        <template v-for="seatIndex in Math.ceil(maxPlayers / 2)" :key="`left-seat-${seatIndex}`">
+        <template v-for="seatIndex in Math.ceil(maxPlayers / 2)" :key="`left-seat-${seatIndex}-${renderTick}`">
           <div
             v-if="getPlayerBySeat(seatIndex)"
             class="seat"
@@ -67,7 +67,7 @@
 
       <!-- 右侧玩家座位 -->
       <div class="side-seats" aria-label="右侧玩家">
-        <template v-for="seatIndex in Math.floor(maxPlayers / 2)" :key="`right-seat-${seatIndex}`">
+        <template v-for="seatIndex in Math.floor(maxPlayers / 2)" :key="`right-seat-${seatIndex}-${renderTick}`">
           <div
             v-if="getPlayerBySeat(Math.ceil(maxPlayers / 2) + seatIndex)"
             class="seat"
@@ -184,6 +184,9 @@ const toastTitle = ref('')
 const showCopyToast = ref(false)
 const copyToastMessage = ref('已复制房间号')
 const showSettings = ref(false)
+// 座位区渲染计数器:playerList每次变化时+1,强制重建座位区DOM
+// (兜底joinRoomSuccess数据已到但座位区偶发不渲染的问题)
+const renderTick = ref(0)
 
 // 从 gameStore 获取反应式数据
 const playerList = computed(() => gameStore.playerList)
@@ -229,6 +232,11 @@ onMounted(async () => {
 watch(messages, () => {
   scrollChatBottom()
 }, { deep: true })
+
+// 玩家列表每次更新(引用变化)时递增渲染计数器，强制重建座位区DOM
+watch(() => gameStore.playerList, () => {
+  renderTick.value++
+}, { flush: 'post' })
 
 onUnmounted(() => {
   // 离开房间时清理
