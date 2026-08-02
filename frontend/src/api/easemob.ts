@@ -103,7 +103,13 @@ export async function joinGroup(groupId: string) {
 
     console.log('✅ 群组加入成功:', result)
     return result
-  } catch (error) {
+  } catch (error: any) {
+    // 服务端REST已把玩家添加为成员时,SDK再join会报"already in group"403,属正常,静默处理
+    const errStr = JSON.stringify(error?.data || '') + (error?.message || '')
+    if (errStr.includes('already in group')) {
+      console.log('✅ 已是群成员(跳过join):', groupId)
+      return null
+    }
     console.error('❌ Join group failed:', error)
     throw error
   }

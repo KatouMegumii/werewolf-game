@@ -159,8 +159,9 @@ export const useGameStore = defineStore('game', () => {
       easemobGroupId.value = groupId
       console.log('✅ Joined Easemob group:', groupId)
 
-      // 监听群组消息
+      // 监听群组消息（自己发的消息已乐观显示，收到回推时跳过避免重复）
       EasemobService.onGroupMessage((message: any) => {
+        if (message.from === easemobUser.value) return
         messages.value.push({
           type: 'easemob',
           from: message.from,
@@ -504,6 +505,14 @@ export const useGameStore = defineStore('game', () => {
   // 发送聊天消息
   // 发送聊天消息：环信群聊为主，未连接环信时降级到Socket（不丢消息）
   function sendMessage(message: string) {
+    // 乐观显示自己的消息（环信SDK不回推发送者自己的消息，需本地显示）
+    messages.value.push({
+      type: 'player',
+      from: playerName.value,
+      text: message,
+      timestamp: new Date()
+    })
+
     if (isEasemobConnected.value && easemobGroupId.value) {
       sendEasemobMessage(message).catch((err) => {
         console.warn('⚠️ 环信发送失败，降级Socket:', err)

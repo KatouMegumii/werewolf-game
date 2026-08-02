@@ -506,7 +506,7 @@ app.post('/api/rooms/:roomId/join', async (req, res) => {
       roomId,
       role: null,
       isAlive: true,
-      seatNumber: room.players.length + 1,  // 新玩家按加入顺序分配座位
+      seatNumber: findAvailableSeat(room), // 分配第一个空闲座位(避免与已换座玩家撞号导致看不到自己)
       joined_at: new Date()
     };
     room.players.push(playerId);
@@ -907,6 +907,21 @@ function buildPlayerList(room) {
     })
     .filter(Boolean)
     .sort((a, b) => (a.seatNumber || 1) - (b.seatNumber || 1));
+}
+
+/**
+ * 分配房间内第一个空闲座位（跳过已被占用的座位号，避免新玩家与已换座玩家撞号）
+ */
+function findAvailableSeat(room) {
+  const occupied = new Set();
+  for (const pid of room.players) {
+    const p = players.get(pid);
+    if (p?.seatNumber) occupied.add(p.seatNumber);
+  }
+  for (let seat = 1; seat <= room.maxPlayers; seat++) {
+    if (!occupied.has(seat)) return seat;
+  }
+  return room.players.length + 1; // 兜底（座位全满时不应走到这里）
 }
 
 /**
