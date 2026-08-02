@@ -157,11 +157,13 @@ export const useGameStore = defineStore('game', () => {
       easemobGroupId.value = groupId
       console.log('✅ Easemob group ready:', groupId)
 
-      // 监听群组消息（双通道消息统一走pushMessage去重）
+      // 监听群组消息（双通道消息统一走pushMessage去重；from是环信用户名,映射回房间内昵称）
       EasemobService.onGroupMessage((message: any) => {
+        const fromUser = message.from
+        const displayName = playerList.value.find(p => p.easemobUser === fromUser)?.name || fromUser
         pushMessage({
           type: 'easemob',
-          from: message.from,
+          from: displayName,
           text: message.msg || message.content,
           timestamp: message.time || new Date()
         })
@@ -510,8 +512,8 @@ export const useGameStore = defineStore('game', () => {
     if (!dup) messages.value.push(msg)
   }
 
-  // 发送聊天消息：socket.io为主通道(实时必达)；环信发送在当前集群挂死(等回执),
-  // 环信保留接收通道(离线/历史消息)，双通道在接收端去重
+  // 发送聊天消息：后端REST发环信群消息(SDK send在4.24+当前集群下等回执挂死)，
+  // 接收端用SDK onTextMessage收；REST失败时降级socket.io(双通道在接收端去重)
   function sendMessage(message: string) {
     // 乐观显示自己的消息
     pushMessage({
@@ -520,7 +522,14 @@ export const useGameStore = defineStore('game', () => {
       text: message,
       timestamp: new Date()
     })
-    sendSocketMessage(message)
+
+    api.post(`/api/rooms/${roomId.value}/message`, {
+      playerName: playerName.value,
+      message
+    }).catch((err) => {
+      console.warn('⚠️ REST群消息发送失败，降级Socket:', err?.message)
+      sendSocketMessage(message)
+    })
   }
 
   // 通过Socket发送（游戏状态/降级通道）

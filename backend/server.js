@@ -658,6 +658,53 @@ app.put('/api/rooms/:roomId/settings', (req, res) => {
 });
 
 /**
+ * 发送房间聊天消息
+ * 走环信REST发群消息(SDK send在4.24+当前集群下等回执挂死),接收端用SDK onTextMessage收
+ */
+app.post('/api/rooms/:roomId/message', async (req, res) => {
+  const { roomId } = req.params;
+  const { playerName, message } = req.body;
+
+  if (!playerName || !message) {
+    return res.status(400).json({ error: '缺少消息内容' });
+  }
+
+  const room = rooms.get(roomId);
+  if (!room) {
+    return res.status(404).json({ error: '房间不存在' });
+  }
+  if (!room.easemobGroupId) {
+    return res.status(400).json({ error: '环信群不可用' });
+  }
+
+  const player = room.players.map(pid => players.get(pid)).find(p => p && p.name === playerName);
+  if (!player) {
+    return res.status(403).json({ error: '玩家不在房间中' });
+  }
+
+  try {
+    const appToken = await getAppToken();
+    await axios.post(
+      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/messages`,
+      {
+        target_type: 'chatgroups',
+        target: [room.easemobGroupId],
+        msg: { type: 'txt', msg: message },
+        from: player.easemobUser
+      },
+      {
+        headers: { 'Authorization': `Bearer ${appToken}`, 'Content-Type': 'application/json' }
+      }
+    );
+    console.log(`📤 REST群消息发送成功: ${playerName}: ${message}`);
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('❌ REST发送群消息失败:', error.response?.status, error.response?.data?.error_description || error.message);
+    res.status(500).json({ error: '消息发送失败' });
+  }
+});
+
+/**
  * 获取房间信息
  */
 app.get('/api/rooms/:roomId', (req, res) => {
@@ -902,7 +949,8 @@ function buildPlayerList(room) {
         avatar: p.avatar || '🧙',
         role: p.role,
         isAlive: p.isAlive,
-        seatNumber: p.seatNumber || 1
+        seatNumber: p.seatNumber || 1,
+        easemobUser: p.easemobUser // 前端用于把环信用户名映射回昵称显示
       };
     })
     .filter(Boolean)
