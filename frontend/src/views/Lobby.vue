@@ -84,7 +84,7 @@
             <span style="color: var(--muted); font-size: 12px;">点击更换头像</span>
           </button>
         </div>
-        <button class="btn btn-primary btn-full" style="margin-top: 14px" @click="saveProfile">保存设置</button>
+        <button class="btn btn-primary btn-full" style="margin-top: 14px" @click="saveProfile" :disabled="savingProfile">{{ savingProfile ? '保存中...' : '保存设置' }}</button>
       </div>
     </div>
 
@@ -198,6 +198,7 @@ const validRooms = ref<any[]>([])
 const userBoards = ref<any[]>([])
 const loading = ref(false)
 const creatingRoom = ref(false)
+const savingProfile = ref(false)
 
 const avatarOptions = ['🧙', '🐺', '🧪', '🏹', '🎭', '🌾', '👻', '🐉', '🦅', '🦊', '🐻', '🦁', '🐼', '🐨', '🐯', '🦓', '🦘', '🐘', '🦏', '🦝', '🦚', '🦜', '🦆', '🦉']
 
@@ -269,6 +270,10 @@ function selectAvatar(avatar: string) {
 }
 
 function saveProfile() {
+  // 防连点：环信 metadata 并发更新会 409(乐观锁)，保存中禁用按钮
+  if (savingProfile.value) return
+  savingProfile.value = true
+
   // 更新store和localStorage
   gameStore.nickname = profileNickname.value
   gameStore.avatar = profileAvatar.value
@@ -285,6 +290,8 @@ function saveProfile() {
   }).catch(err => {
     console.error('❌ 同步到环信失败:', err)
     toast('保存失败，但本地已更新')
+  }).finally(() => {
+    savingProfile.value = false
   })
 
   showProfileModal.value = false

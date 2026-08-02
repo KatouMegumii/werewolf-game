@@ -834,23 +834,44 @@ app.put('/api/auth/user/:username', async (req, res) => {
     console.log(`准备更新数据:`, updateData);
 
     // 更新用户属性到环信（使用metadata API）
-    try {
-      const attrData = qs.stringify(updateData);
-
-      const updateRes = await axios.put(
-        `http://ngi-a1.easemob.com/1196260703193552/langrensha/metadata/user/${username}`,
-        attrData,
-        {
-          headers: {
-            'Authorization': `Bearer ${appToken}`,
-            'Content-Type': 'application/x-www-form-urlencoded'
+    // 409 = 乐观锁并发冲突（metadata文档：并发修改同一用户只有一个成功），等300ms重试一次全量写入
+    let updateRes;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const attrData = qs.stringify(updateData);
+        updateRes = await axios.put(
+          `http://ngi-a1.easemob.com/1196260703193552/langrensha/metadata/user/${username}`,
+          attrData,
+          {
+            headers: {
+              'Authorization': `Bearer ${appToken}`,
+              'Content-Type': 'application/x-www-form-urlencoded'
+            }
           }
+        );
+        break; // 写入成功
+      } catch (err) {
+        const is409 = err.response?.status === 409;
+        console.error(`❌ 更新属性失败(第${attempt}次):`, err.response?.status, err.response?.data?.desc || err.response?.data);
+        if (!is409 || attempt === 2) throw err;
+        console.warn('↻ 409 并发冲突，300ms后重试...');
+        await new Promise(r => setTimeout(r, 300));
+      }
+    }
+    console.log(`✅ 用户属性已更新到环信:`, JSON.stringify(updateRes.data));
+
+    // 头像已同步 → 更新内存中该玩家的头像并广播给所在房间（同房间玩家即时看到新头像）
+    if (avatar !== undefined) {
+      const lowerUsername = username.toLowerCase();
+      for (const [pid, p] of players.entries()) {
+        if ((p.easemobUser || '').toLowerCase() !== lowerUsername && (p.name || '').toLowerCase() !== lowerUsername) continue;
+        const changed = p.avatar !== avatar;
+        p.avatar = avatar;
+        if (changed && p.roomId && rooms.has(p.roomId)) {
+          io.to(p.roomId).emit('playerAvatarUpdated', { playerId: pid, avatar });
+          console.log(`🖼️ 头像更新已广播给房间 ${p.roomId}: ${p.name} -> ${avatar}`);
         }
-      );
-      console.log(`✅ 用户属性已更新到环信:`, JSON.stringify(updateRes.data));
-    } catch (err) {
-      console.error(`❌ 更新属性失败:`, err.response?.status, err.response?.data);
-      throw err;
+      }
     }
 
     res.json({

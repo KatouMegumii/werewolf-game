@@ -453,6 +453,13 @@ export const useGameStore = defineStore('game', () => {
       router.push('/lobby')
     })
 
+    // 玩家头像更新（换头像广播，同房间玩家即时看到新头像）
+    socket.on('playerAvatarUpdated', (data: any) => {
+      console.log('🖼️ 玩家头像更新:', data.playerId, data.avatar)
+      const p = playerList.value.find(x => x.playerId === data.playerId)
+      if (p) p.avatar = data.avatar
+    })
+
     // 房主变更（转让）
     socket.on('hostChanged', (data: any) => {
       console.log('👑 房主变更为:', data.hostName)
