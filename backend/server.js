@@ -375,7 +375,11 @@ app.post('/api/rooms', async (req, res) => {
         boardName = boardRes.rows[0].name;
         const roles = JSON.parse(boardRes.rows[0].roles);
         if (Array.isArray(roles) && roles.length > 0) {
-          maxPlayers = roles.length;
+          // roles是角色配置数组:[{key,name,count,...}],玩家总数 = 各角色count之和(如狼人×2+村民×6=8人)
+          const totalPlayers = roles.reduce((sum, role) => sum + (Number(role.count) || 1), 0);
+          if (totalPlayers > 0) {
+            maxPlayers = totalPlayers;
+          }
         }
       } else {
         // 数据库没有该板子，回退到内置配置
