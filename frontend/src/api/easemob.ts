@@ -62,6 +62,16 @@ export async function loginEasemob(username: string, accessToken: string) {
     })
 
     console.log('✅ Easemob login success:', result)
+    // 诊断:打印sock真实状态(排查发送挂起问题——伪sock时send空转)
+    setTimeout(() => {
+      const c: any = client
+      console.log('🔍 sock诊断:', {
+        sockType: c.sock?.constructor?.name,
+        readyState: c.sock?.readyState,
+        hasSend: typeof c.sock?.send,
+        getSockType: typeof c._getSock
+      })
+    }, 1000)
     return result
   } catch (error) {
     console.error('❌ Easemob login failed:', error)
