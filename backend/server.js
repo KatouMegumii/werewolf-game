@@ -939,8 +939,20 @@ function removePlayerFromRoom(roomId, playerId, playerName) {
     console.log(`🗑️ 空房间 ${roomId} 已删除`);
     // 房间解散，同步解散环信群（失败仅warn，不阻塞）
     destroyEasemobGroup(room.easemobGroupId);
-  } else if (player?.easemobUser && room.easemobGroupId && player.easemobUser !== room.hostEasemobUser) {
-    // 房间还有其他人，把离开的玩家移出群（群主不移除——环信禁止移除群主，群主身份保留到群解散）
+  } else if (playerId === room.hostPlayerId) {
+    // 房主离开但房间还有人：自动转让房主给座位号最小的玩家（离1号位最近）
+    const sorted = buildPlayerList(room);
+    const newHost = sorted[0];
+    room.hostPlayerId = newHost.playerId;
+    io.to(roomId).emit('hostChanged', {
+      hostPlayerId: newHost.playerId,
+      hostName: newHost.name
+    });
+    console.log(`👑 房主 ${playerName} 已离开，房主自动转移给 ${newHost.name}（座位${newHost.seatNumber}）`);
+  }
+
+  // 房间还有其他人，把离开的玩家移出环信群（群主不移除——环信禁止移除群主，群主身份保留到群解散）
+  if (player?.easemobUser && room.easemobGroupId && player.easemobUser !== room.hostEasemobUser) {
     removeEasemobGroupMember(room.easemobGroupId, player.easemobUser);
   }
 }
