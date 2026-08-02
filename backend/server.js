@@ -1387,10 +1387,11 @@ io.on('connection', (socket) => {
 app.get('/api/boards', async (req, res) => {
   try {
     const db = getDb();
-    const userId = req.headers['x-user-id'] || 'default';
+    // userId 统一小写 + LOWER 兜底存量记录(旧版本存过大小写混合的 userId,PG 的 TEXT 比较大小写敏感)
+    const userId = String(req.headers['x-user-id'] || 'default').toLowerCase();
 
     const result = await db.query(
-      'SELECT * FROM boards WHERE userId = $1 ORDER BY isFavorite DESC, createdAt DESC',
+      'SELECT * FROM boards WHERE LOWER(userId) = $1 ORDER BY isFavorite DESC, createdAt DESC',
       [userId]
     );
 
@@ -1405,12 +1406,19 @@ app.get('/api/boards', async (req, res) => {
 app.post('/api/boards', async (req, res) => {
   try {
     const db = getDb();
-    const userId = req.headers['x-user-id'] || 'default';
+    const userId = String(req.headers['x-user-id'] || 'default').toLowerCase();
     const { name, roles, summary, isFavorite } = req.body;
 
     if (!name || !roles) {
       return res.status(400).json({ error: '缺少必要字段' });
     }
+
+    // 迁移:先把该用户存量大小写不一致的板子记录统一为小写 userId
+    // (否则 LOWER 匹配会读到旧记录,同时小写 INSERT 又会新建一条 → 同名板子重复)
+    await db.query(
+      'UPDATE boards SET userId = $1 WHERE LOWER(userId) = $1',
+      [userId]
+    );
 
     await db.query(
       `INSERT INTO boards (userId, name, roles, summary, isFavorite)
@@ -1431,11 +1439,11 @@ app.post('/api/boards', async (req, res) => {
 app.delete('/api/boards/:name', async (req, res) => {
   try {
     const db = getDb();
-    const userId = req.headers['x-user-id'] || 'default';
+    const userId = String(req.headers['x-user-id'] || 'default').toLowerCase();
     const boardName = decodeURIComponent(req.params.name);
 
     const result = await db.query(
-      'DELETE FROM boards WHERE userId = $1 AND name = $2',
+      'DELETE FROM boards WHERE LOWER(userId) = $1 AND name = $2',
       [userId, boardName]
     );
 
