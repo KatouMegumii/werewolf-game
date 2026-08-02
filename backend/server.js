@@ -110,7 +110,7 @@ async function removeEasemobGroupMember(groupId, username) {
       { headers: { 'Authorization': `Bearer ${appToken}` } }
     );
   } catch (err) {
-    console.warn(`⚠️ 移除环信群成员 ${username} 失败:`, err.response?.status, err.response?.data?.error || err.message);
+    console.warn(`⚠️ 移除环信群成员 ${username} 失败:`, err.response?.status, JSON.stringify(err.response?.data) || err.message);
   }
 }
 
@@ -515,7 +515,7 @@ app.post('/api/rooms/:roomId/join', async (req, res) => {
     if (room.easemobGroupId && player.easemobUser) {
       addEasemobGroupMember(room.easemobGroupId, player.easemobUser)
         .then(() => console.log(`✅ 玩家 ${playerName} 已加入环信群 ${room.easemobGroupId}`))
-        .catch(err => console.warn(`⚠️ 添加群成员失败:`, err.message));
+        .catch(err => console.warn(`⚠️ 添加群成员失败:`, err.response?.status, JSON.stringify(err.response?.data) || err.message));
     }
   }
 
