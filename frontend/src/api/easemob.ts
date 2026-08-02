@@ -85,37 +85,6 @@ export async function logoutEasemob() {
 }
 
 /**
- * 加入群组（群由服务端通过REST创建并预添加成员，这里用真实groupId加入）
- * SDK 4.24: 群API直接挂在connection实例上(client.joinGroup)，不再通过client.Group
- */
-export async function joinGroup(groupId: string) {
-  if (!client) {
-    throw new Error('Easemob SDK not initialized')
-  }
-
-  try {
-    console.log(`👋 加入群组: ${groupId}...`)
-
-    const result = await client.joinGroup({
-      groupId: groupId,
-      message: 'Request to join'
-    })
-
-    console.log('✅ 群组加入成功:', result)
-    return result
-  } catch (error: any) {
-    // 服务端REST已把玩家添加为成员时,SDK再join会报"already in group"403,属正常,静默处理
-    const errStr = JSON.stringify(error?.data || '') + (error?.message || '')
-    if (errStr.includes('already in group')) {
-      console.log('✅ 已是群成员(跳过join):', groupId)
-      return null
-    }
-    console.error('❌ Join group failed:', error)
-    throw error
-  }
-}
-
-/**
  * 发送文本消息到群组
  */
 export async function sendGroupMessage(

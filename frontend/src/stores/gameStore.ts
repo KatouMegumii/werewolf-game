@@ -152,12 +152,10 @@ export const useGameStore = defineStore('game', () => {
     }
 
     try {
-      // 服务端已把玩家预添加为群成员，join失败（如已是成员）不阻塞
-      await EasemobService.joinGroup(groupId).catch((err: any) => {
-        console.warn('⚠️ 加入群组提示（可能已是成员）:', err?.message)
-      })
+      // 服务端REST已把玩家添加为群成员，SDK登录后自动同步群列表，
+      // 不调用joinGroup（已是成员时join会403，且可能卡住后续send发送队列）
       easemobGroupId.value = groupId
-      console.log('✅ Joined Easemob group:', groupId)
+      console.log('✅ Easemob group ready:', groupId)
 
       // 监听群组消息（自己发的消息已乐观显示，收到回推时跳过避免重复）
       EasemobService.onGroupMessage((message: any) => {
@@ -170,7 +168,7 @@ export const useGameStore = defineStore('game', () => {
         })
       })
     } catch (error) {
-      console.error('❌ Failed to join Easemob group:', error)
+      console.error('❌ Failed to prepare Easemob group:', error)
       throw error
     }
   }
