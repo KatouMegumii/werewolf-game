@@ -22,7 +22,11 @@ app.use(express.json());
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.VITE_ALLOWED_ORIGIN || 'http://localhost:5173',
+    // 未配置VITE_ALLOWED_ORIGIN时开发默认允许所有来源；
+    // 生产可配置多个域名，逗号分隔，如 "https://a.com,https://b.com"
+    origin: process.env.VITE_ALLOWED_ORIGIN
+      ? process.env.VITE_ALLOWED_ORIGIN.split(',').map(s => s.trim()).filter(Boolean)
+      : true,
     methods: ['GET', 'POST']
   },
   // 断线检测更快（默认25s），配合30s重连缓冲使用
