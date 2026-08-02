@@ -295,21 +295,30 @@ export const useGameStore = defineStore('game', () => {
 
   // 离开房间
   function leaveRoom() {
-    // 发送离开事件（如果Socket存在）
+    // 发送离开事件并等服务端ack后再断开（emit后立即disconnect会丢包，导致房间残留30s缓冲期）
     if (socket && roomId.value && playerId.value) {
       console.log(`📤 正在离开房间 ${roomId.value}...`);
       socket.emit('leaveRoom', {
         roomId: roomId.value,
         playerId: playerId.value,
         playerName: playerName.value
+      }, () => {
+        console.log('✅ 服务端已确认离开')
+        doDisconnect()
       })
+    } else {
+      doDisconnect()
     }
 
-    // 断开Socket连接
-    if (socket) {
-      socket.disconnect()
-      socket = null
-      console.log('✅ Socket已断开')
+    // ack丢失时的兜底：3s后无论如何断开（后端disconnect也有30s缓冲清理兜底）
+    const timer = setTimeout(doDisconnect, 3000)
+    function doDisconnect() {
+      clearTimeout(timer)
+      if (socket) {
+        socket.disconnect()
+        socket = null
+        console.log('✅ Socket已断开')
+      }
     }
 
     // 异步断开Easemob（不阻塞）
