@@ -832,13 +832,21 @@ app.post('/api/easemob/token', async (req, res) => {
     );
     const appToken = appTokenRes.data.access_token;
 
-    // 第2步: 获取用户Token（环信REST: GET /users/{username}/token）
-    const userTokenRes = await axios.get(
-      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/users/${username}/token`,
+    // 第2步: 获取用户Token（环信REST: POST /token + grant_type=inherit，App Token签发，免密）
+    // 文档: https://docs-im.easemob.com/ccim/rest/usertoken
+    const userTokenRes = await axios.post(
+      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/token`,
+      {
+        grant_type: 'inherit',
+        username,
+        autoCreateUser: false,
+        ttl: 7 * 24 * 3600
+      },
       {
         headers: {
           'Authorization': `Bearer ${appToken}`,
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
         }
       }
     );
