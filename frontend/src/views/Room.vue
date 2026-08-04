@@ -25,12 +25,17 @@
           <div
             v-if="getPlayerBySeat(seatIndex)"
             class="seat"
-            :class="{ host: getPlayerBySeat(seatIndex).playerId === gameStore.currentRoom?.hostPlayerId }"
+            :class="{
+              host: getPlayerBySeat(seatIndex).playerId === gameStore.currentRoom?.hostPlayerId,
+              speaking: voiceStore.isSpeaking(getPlayerBySeat(seatIndex).playerId)
+            }"
           >
             <span class="badge" v-if="getPlayerBySeat(seatIndex).playerId === gameStore.currentRoom?.hostPlayerId">★</span>
             <div class="seat-avatar">{{ getPlayerBySeat(seatIndex).avatar }}</div>
             <div class="seat-name">{{ seatIndex }} {{ getPlayerBySeat(seatIndex).name }}</div>
-            <div class="seat-tag">在线</div>
+            <div class="seat-tag">
+              {{ voiceStore.isPlayerMuted(getPlayerBySeat(seatIndex).playerId) ? '🔇 静音' : (voiceStore.isSpeaking(getPlayerBySeat(seatIndex).playerId) ? '🔊 说话中' : (voiceStore.isVoiceJoined ? '🎙 在线' : '在线')) }}
+            </div>
           </div>
           <div v-else class="seat empty" @click="swapSeat(seatIndex)" :title="`点击移至座位 ${seatIndex}`">
             <div class="seat-avatar">?</div>
@@ -54,7 +59,7 @@
         <section class="chat-panel" aria-label="房间聊天框信息">
           <div class="chat-head">
             <span>房间聊天</span>
-            <span :style="{ color: gameStore.isEasemobConnected ? '#34d399' : '#f59e0b' }">● {{ gameStore.isEasemobConnected ? '环信已连接' : '连接中…' }}</span>
+            <span :style="{ color: connStatus.color }">● {{ connStatus.text }}</span>
           </div>
           <div class="chat-list" ref="chatListRef">
             <div v-for="(msg, idx) in messages" :key="idx" :class="['msg', msg.type]">
@@ -71,10 +76,13 @@
           <div
             v-if="getPlayerBySeat(Math.ceil(maxPlayers / 2) + seatIndex)"
             class="seat"
+            :class="{ speaking: voiceStore.isSpeaking(getPlayerBySeat(Math.ceil(maxPlayers / 2) + seatIndex).playerId) }"
           >
             <div class="seat-avatar">{{ getPlayerBySeat(Math.ceil(maxPlayers / 2) + seatIndex).avatar }}</div>
             <div class="seat-name">{{ Math.ceil(maxPlayers / 2) + seatIndex }} {{ getPlayerBySeat(Math.ceil(maxPlayers / 2) + seatIndex).name }}</div>
-            <div class="seat-tag">在线</div>
+            <div class="seat-tag">
+              {{ voiceStore.isPlayerMuted(getPlayerBySeat(Math.ceil(maxPlayers / 2) + seatIndex).playerId) ? '🔇 静音' : (voiceStore.isSpeaking(getPlayerBySeat(Math.ceil(maxPlayers / 2) + seatIndex).playerId) ? '🔊 说话中' : (voiceStore.isVoiceJoined ? '🎙 在线' : '在线')) }}
+            </div>
           </div>
           <div v-else class="seat empty" @click="swapSeat(Math.ceil(maxPlayers / 2) + seatIndex)" :title="`点击移至座位 ${Math.ceil(maxPlayers / 2) + seatIndex}`">
             <div class="seat-avatar">?</div>
@@ -84,28 +92,21 @@
       </div>
     </div>
 
-    <!-- 底部输入区 -->
+    <!-- 底部输入区:左侧语音按钮(icon+文字指引) + 打字框 -->
     <footer class="room-input-area">
-      <div class="mode-switch" role="tablist">
+      <div class="input-row">
         <button
-          :class="{ active: inputMode === 'text' }"
-          @click="inputMode = 'text'"
-          type="button"
+          class="voice-btn"
+          :class="{ muted: voiceStore.isMuted }"
+          @click="handleToggleMute"
+          :disabled="!voiceStore.isVoiceJoined && !voiceStore.voiceError"
+          :title="voiceStore.voiceError || '实时语音：开麦即可说话，其他人能听到'"
         >
-          ⌨ 打字模式
+          <span class="voice-btn-icon">{{ voiceStore.isMuted ? '🔇' : '🎙' }}</span>
+          <span class="voice-btn-text">
+            {{ voiceStore.voiceError ? '语音不可用' : (voiceStore.isVoiceJoined ? (voiceStore.isMuted ? '点击开麦说话' : '点击静音') : '语音连接中…') }}
+          </span>
         </button>
-        <button
-          :class="{ active: inputMode === 'voice' }"
-          @click="inputMode = 'voice'"
-          type="button"
-        >
-          🎙 发言模式
-        </button>
-      </div>
-
-      <!-- 打字模式 -->
-      <div v-if="inputMode === 'text'" class="input-row">
-        <button class="icon-btn" @click="toast('表情面板')">☺</button>
         <input
           v-model="messageText"
           class="chat-input"
@@ -113,21 +114,6 @@
           @keydown.enter="sendMessage"
         />
         <button class="send-btn" @click="sendMessage">发送</button>
-      </div>
-
-      <!-- 语音模式 -->
-      <div v-if="inputMode === 'voice'" class="voice-row">
-        <button class="icon-btn" @click="toast('静音切换')">🔇</button>
-        <button
-          class="voice-hold"
-          @mousedown="voiceStart"
-          @mouseup="voiceEnd"
-          @touchstart="voiceStart"
-          @touchend="voiceEnd"
-        >
-          按住发言
-        </button>
-        <button class="send-btn" @click="toast('申请发言')">举手</button>
       </div>
     </footer>
 
@@ -168,14 +154,15 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useGameStore } from '../stores/gameStore'
+import { useVoiceStore } from '../stores/voiceStore'
 import { ChevronLeft, Settings, Copy, X } from 'lucide-vue-next'
 
 const router = useRouter()
 const route = useRoute()
 const gameStore = useGameStore()
+const voiceStore = useVoiceStore()
 
 const roomId = ref(route.params.roomId as string)
-const inputMode = ref<'text' | 'voice'>('text')
 const messageText = ref('')
 const chatListRef = ref<HTMLElement>()
 const showToast = ref(false)
@@ -192,6 +179,14 @@ const renderTick = ref(0)
 const playerList = computed(() => gameStore.playerList)
 const messages = computed(() => gameStore.messages)
 const maxPlayers = computed(() => gameStore.currentRoom?.maxPlayers || 12)
+
+// 连接状态(环信+语音合并:都通则绿,未通则提示是哪个没通)
+const connStatus = computed(() => {
+  if (voiceStore.voiceError) return { color: '#f87171', text: '语音不可用' }
+  if (!gameStore.isEasemobConnected) return { color: '#f59e0b', text: '环信连接中…' }
+  if (!voiceStore.isVoiceJoined) return { color: '#f59e0b', text: '语音连接中…' }
+  return { color: '#34d399', text: '已连接' }
+})
 
 onMounted(async () => {
   if (!gameStore.isLoggedIn) {
@@ -217,6 +212,9 @@ onMounted(async () => {
   await nextTick()
   gameStore.joinRoomSocket(roomId.value)
 
+  // 语音信令监听(socket 就绪后注册;被踢/解散/退出最终都离开页面,由 onUnmounted 兜底出频道)
+  voiceStore.initSignaling()
+
   // 防御兜底:1.5s后若玩家列表仍无自己(joinRoomSuccess可能丢失/渲染异常),自动重新入房
   setTimeout(() => {
     const me = gameStore.playerList.find(p => p.playerId === gameStore.playerId)
@@ -227,6 +225,17 @@ onMounted(async () => {
     }
   }, 1500)
 })
+
+// 语音:环信已连接 + 自己已在玩家列表 → 自动进语音频道(语音房间模式:进房即在频道)
+watch(
+  [() => gameStore.isEasemobConnected, () => gameStore.playerList.length],
+  () => {
+    if (gameStore.isEasemobConnected && !voiceStore.isVoiceJoined && !voiceStore.isJoining) {
+      voiceStore.enterVoice().catch(() => {})
+    }
+  },
+  { immediate: true }
+)
 
 // 监听消息变化，自动滚动到底
 watch(messages, () => {
@@ -239,7 +248,9 @@ watch(() => gameStore.playerList, () => {
 }, { flush: 'post' })
 
 onUnmounted(() => {
-  // 离开房间时清理
+  // 离开房间时先出语音频道再清理房间(幂等:被踢/解散/主动退出都可能触发)
+  voiceStore.destroySignaling()
+  voiceStore.leaveVoice().catch(() => {})
   gameStore.leaveRoom()
 })
 
@@ -249,13 +260,10 @@ const sendMessage = () => {
   messageText.value = ''
 }
 
-const voiceStart = () => {
-  toast('正在录音，松开发送')
-}
-
-const voiceEnd = () => {
-  gameStore.sendMessage('🎙 语音消息 04″')
-  toast('语音已发送')
+// 开麦/关麦切换(语音房间默认开麦说话,点击关麦)
+const handleToggleMute = async () => {
+  const muted = await voiceStore.toggleMute()
+  toast(muted ? '已静音' : '已开麦')
 }
 
 const scrollChatBottom = () => {
@@ -659,13 +667,14 @@ function swapSeat(targetSeatIndex: number) {
 
 .input-row,
 .voice-row {
-  display: grid;
-  grid-template-columns: 38px 1fr 48px;
-  gap: 8px;
+  display: flex;
   align-items: center;
+  gap: 8px;
 }
 
 .chat-input {
+  flex: 1;
+  min-width: 0;
   height: 42px;
   border: 1px solid rgba(255,255,255,.10);
   border-radius: 999px;
@@ -673,7 +682,6 @@ function swapSeat(targetSeatIndex: number) {
   color: var(--text);
   padding: 0 14px;
   outline: 0;
-  min-width: 0;
   font-family: inherit;
 }
 
@@ -683,13 +691,17 @@ function swapSeat(targetSeatIndex: number) {
 
 .send-btn {
   height: 42px;
+  padding: 0 22px;
+  min-width: 64px;
   border: 0;
   border-radius: 999px;
   color: #1e1307;
   font-weight: 950;
+  font-size: 14px;
   background: linear-gradient(135deg, #fde68a, #fb923c);
   cursor: pointer;
   transition: all .2s ease;
+  flex-shrink: 0;
 }
 
 .send-btn:active {
@@ -709,6 +721,80 @@ function swapSeat(targetSeatIndex: number) {
 
 .voice-hold:active {
   transform: scale(.98);
+}
+
+/* 语音:静音态按钮与按住说话、状态标签 */
+.icon-btn.muted {
+  background: rgba(248,113,113,.15);
+  color: #f87171;
+}
+
+.voice-hold.muted {
+  border-color: rgba(248,113,113,.35);
+  background: rgba(248,113,113,.12);
+  color: #fecaca;
+}
+
+.voice-status {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.voice-status.error {
+  color: #f87171;
+}
+
+/* 底部语音状态行(连接人数/静音态,单行不换行) */
+.voice-status-line {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.voice-status-line.error {
+  color: #f87171;
+}
+
+/* 语音按钮(输入框左侧,icon+文字指引,默认静音态) */
+.voice-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 42px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(52,211,153,.12);
+  color: #34d399;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all .2s ease;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.voice-btn:hover {
+  transform: scale(1.03);
+}
+
+.voice-btn:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.voice-btn-icon {
+  font-size: 16px;
+}
+
+.voice-btn.muted {
+  background: rgba(248,113,113,.12);
+  color: #f87171;
 }
 
 .icon-btn {

@@ -8,6 +8,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "agora-rtc-sdk-ng": "^4.24.7",
     "axios": "^1.5.0",
     "easemob-websdk": "^4.9.10",
     "lucide-vue-next": "^1.0.0",

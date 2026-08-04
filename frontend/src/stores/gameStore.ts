@@ -170,7 +170,7 @@ export const useGameStore = defineStore('game', () => {
           type: 'easemob',
           from: displayName,
           text: message.msg || message.content,
-          timestamp: message.time || new Date()
+          timestamp: normalizeEasemobTime(message.time)
         })
       })
     } catch (error) {
@@ -513,14 +513,30 @@ export const useGameStore = defineStore('game', () => {
     })
   }
 
+  // 环信消息 time 可能是秒级(10位)或毫秒级(13位)数字,也可能是数字字符串——
+  // new Date(秒/字符串数字) 会得到 Invalid Date → 去重比较 NaN 失效,消息重复显示
+  function normalizeEasemobTime(ts: any): Date {
+    if (!ts) return new Date()
+    const num = typeof ts === 'string' && ts.trim() !== '' ? Number(ts) : ts
+    if (typeof num === 'number' && Number.isFinite(num)) {
+      return num < 1e12 ? new Date(num * 1000) : new Date(num)
+    }
+    return new Date(ts)
+  }
+
   // 发送聊天消息
-  // 双通道消息去重：2秒内同发送者同内容视为重复（socket广播与环信回推可能同时到达）
+  // 双通道消息去重:2秒内同发送者同内容视为重复(socket广播与环信回推可能同时到达);
+  // 时间戳任一非法时直接按"同发送者同内容"去重(双通道回显场景,内容相同即重复)
   function pushMessage(msg: any) {
-    const dup = messages.value.some(m =>
-      m.from === msg.from &&
-      m.text === msg.text &&
-      Math.abs(new Date(m.timestamp).getTime() - new Date(msg.timestamp).getTime()) < 2000
-    )
+    const t = new Date(msg.timestamp).getTime()
+    const dup = messages.value.some(m => {
+      if (m.from !== msg.from || m.text !== msg.text) return false
+      const mt = new Date(m.timestamp).getTime()
+      // 窗口 5s:本地时钟与环信服务器时钟有约 2.2s 偏移(实测),2s 窗口会漏去重导致消息重复
+      return Number.isFinite(t) && Number.isFinite(mt)
+        ? Math.abs(mt - t) < 5000
+        : true
+    })
     if (!dup) messages.value.push(msg)
   }
 
@@ -646,6 +662,8 @@ export const useGameStore = defineStore('game', () => {
     fetchRooms,
     getEasemobToken,
     leaveRoom,
+    // 暴露 socket 引用(voiceStore 注册语音信令监听)
+    getSocket: () => socket,
 
     // Easemob管理
     connectEasemob,

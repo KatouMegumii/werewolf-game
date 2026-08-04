@@ -1021,6 +1021,33 @@ app.post('/api/easemob/token', async (req, res) => {
   }
 });
 
+// 音视频 token 代理:浏览器直连环信 REST 会命中 CORS 限制,
+// 统一走后端用 App Token 代理同一端点(getRTCToken 的服务端等价)
+app.post('/api/easemob/rtc-token', async (req, res) => {
+  let { username, channelName } = req.body;
+  if (!username || !channelName) {
+    return res.status(400).json({ error: '缺少参数' });
+  }
+  try {
+    username = await normalizeEasemobUsername(username);
+    const appToken = await getAppToken();
+    const r = await axios.get(
+      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/users/${username}/token/rtc?channelName=${encodeURIComponent(channelName)}`,
+      { headers: { 'Authorization': `Bearer ${appToken}` } }
+    );
+    res.json({
+      appId: r.data.app_id,
+      token: r.data.rtc_token,
+      uid: r.data.rtcUid,
+      channel: r.data.channel_name,
+      expiresIn: r.data.expires_in
+    });
+  } catch (err) {
+    console.error('❌ 获取音视频 token 失败:', err.response?.status, err.response?.data?.error_description || err.message);
+    res.status(500).json({ error: '获取语音凭证失败', details: err.response?.data });
+  }
+});
+
 // ===== Socket.io 事件处理 =====
 
 // 追踪 socket 连接到房间/玩家的映射
@@ -1237,6 +1264,26 @@ io.on('connection', (socket) => {
       message,
       timestamp: new Date(),
       type: 'player'
+    });
+  });
+
+  // 语音状态广播(uid映射/静音/进出语音频道)——鉴权与 sendMessage 相同
+  socket.on('voiceState', (data) => {
+    const { roomId, type, playerId, rtcUid, muted } = data;
+    const socketInfo = socketToPlayer.get(socket.id);
+
+    if (!socketInfo || socketInfo.roomId !== roomId) {
+      console.warn('❌ 语音状态来自非房间玩家');
+      return;
+    }
+
+    io.to(roomId).emit('voiceState', {
+      type, // voice_joined | voice_left | voice_muted | voice_unmuted
+      playerId,
+      playerName: socketInfo.playerName,
+      rtcUid,
+      muted,
+      timestamp: new Date()
     });
   });
 
