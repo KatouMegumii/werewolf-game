@@ -135,26 +135,19 @@ const handleLoginUser = async () => {
   loading.value = true
 
   try {
+    // 登录输入原样 trim 不转小写:环信用户名大小写保留,存量大写用户必须原样验密;
+    // 真实名以服务端响应为准(后端 GET /users 解析),setCurrentUser 原样存储
     const res = await api.post('/api/auth/login', {
-      username: loginUsername.value.trim().toLowerCase(),
+      username: loginUsername.value.trim(),
       password: loginPassword.value
     })
 
-    const { userId, nickname: userNickname, avatar, appKey } = res.data
-
-    gameStore.setCurrentUser({
-      userId,
-      username: loginUsername.value.trim().toLowerCase(),
-      nickname: userNickname,
-      avatar: avatar || '🧙',
-      easemobUser: userId,
-      appKey
-    })
+    gameStore.setCurrentUser(res.data)
 
     router.push('/')
   } catch (err: any) {
-    const errorMsg = err.response?.data?.details?.error_description ||
-                     err.response?.data?.error ||
+    const errorMsg = err.response?.data?.error ||
+                     err.response?.data?.details?.error_description ||
                      '登录失败，请检查账号和密码'
     error.value = errorMsg
   } finally {
@@ -188,27 +181,19 @@ const handleRegister = async () => {
   loading.value = true
 
   try {
+    // 注册保留 toLowerCase = 创建规范(新用户一律小写);响应真实名原样交给 setCurrentUser
     const res = await api.post('/api/auth/register', {
       username: username.value.trim().toLowerCase(),
       nickname: nickname.value.trim(),
       password: password.value
     })
 
-    const { userId, avatar, appKey } = res.data
-
-    gameStore.setCurrentUser({
-      userId,
-      username: username.value.trim().toLowerCase(),
-      nickname: nickname.value.trim(),
-      avatar: avatar || '🧙',
-      easemobUser: userId,
-      appKey
-    })
+    gameStore.setCurrentUser(res.data)
 
     router.push('/')
   } catch (err: any) {
-    const errorMsg = err.response?.data?.details?.error_description ||
-                     err.response?.data?.error ||
+    const errorMsg = err.response?.data?.error ||
+                     err.response?.data?.details?.error_description ||
                      '注册失败，请重试'
     error.value = errorMsg
   } finally {

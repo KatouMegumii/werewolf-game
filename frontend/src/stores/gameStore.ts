@@ -8,17 +8,18 @@ import router from '../router'
 
 export const useGameStore = defineStore('game', () => {
   // 用户信息
-  // 环信用户名统一小写:users 实体强制小写但 metadata 大小写敏感,
-  // 历史版本可能在 localStorage 存了大写 username(旧会话未重新登录),
-  // 这里初始化即规范化,后续建房/入房/换头像/token 全部使用小写真实名
-  const userId = ref<string>((localStorage.getItem('userId') || '').toLowerCase())
-  const username = ref<string>((localStorage.getItem('username') || '').toLowerCase())
+  // 环信用户名大小写保留(真实名),禁止任何大小写转换——转换会把大写存量用户劈成另一个账号;
+  // 历史版本可能存了小写的错位名,重登一次即修复(登录响应返回真实名原样落盘)
+  const userId = ref<string>(localStorage.getItem('userId') || '')
+  const username = ref<string>(localStorage.getItem('username') || '')
   const nickname = ref<string>(localStorage.getItem('nickname') || '')
   const avatar = ref<string>(localStorage.getItem('avatar') || '🧙')
-  const easemobUser = ref<string>((localStorage.getItem('easemobUser') || '').toLowerCase())
+  const easemobUser = ref<string>(localStorage.getItem('easemobUser') || '')
   const appKey = ref<string>(localStorage.getItem('appKey') || '')
   // 环信用户Token：只存内存 + sessionStorage（刷新免重输密码，关浏览器即失效），密码永不落盘
   const easemobAccessToken = ref<string>(sessionStorage.getItem('easemobAccessToken') || '')
+  // token 过期时间(ms):从签发响应 expiresIn 推算,过期自动重签
+  const easemobTokenExpiresAt = ref<number>(Number(sessionStorage.getItem('easemobTokenExpiresAt')) || 0)
 
   // Socket.io
   let socket: Socket | null = null
@@ -45,19 +46,24 @@ export const useGameStore = defineStore('game', () => {
   const isHost = computed(() => !!currentRoom.value?.hostPlayerId && currentRoom.value.hostPlayerId === playerId.value)
 
   // 设置当前用户（密码不再进入前端存储；环信凭证由后端签发token）
-  // 环信用户名统一小写落盘(users实体强制小写、metadata大小写敏感,混用会读写分裂)
+  // 真实名原样存储,不做大小写转换(环信用户名大小写保留,转换会把大写用户劈成另一个账号)
   function setCurrentUser(user: any) {
-    userId.value = String(user.userId || '').toLowerCase()
-    username.value = String(user.username || '').toLowerCase()
+    userId.value = user.userId || ''
+    username.value = user.username || ''
     nickname.value = user.nickname
     avatar.value = user.avatar || '🧙'
-    easemobUser.value = String(user.easemobUser || user.username || '').toLowerCase()
+    easemobUser.value = user.easemobUser || user.username || ''
     appKey.value = user.appKey
 
-    // 登录响应若带回token则直接使用（进入房间时也会经 /api/easemob/token 重新签发）
+    // 登录/注册响应带回token则直接使用（进入房间时也会经 /api/easemob/token 重新签发）
     if (user.accessToken) {
       easemobAccessToken.value = user.accessToken
       sessionStorage.setItem('easemobAccessToken', user.accessToken)
+      // 记录过期时间,过期自动重签
+      if (user.expiresIn) {
+        easemobTokenExpiresAt.value = Date.now() + user.expiresIn * 1000
+        sessionStorage.setItem('easemobTokenExpiresAt', String(easemobTokenExpiresAt.value))
+      }
     }
 
     localStorage.setItem('userId', userId.value)
@@ -80,6 +86,8 @@ export const useGameStore = defineStore('game', () => {
     appKey.value = ''
     easemobAccessToken.value = ''
     sessionStorage.removeItem('easemobAccessToken')
+    easemobTokenExpiresAt.value = 0
+    sessionStorage.removeItem('easemobTokenExpiresAt')
     localStorage.removeItem('userId')
     localStorage.removeItem('username')
     localStorage.removeItem('nickname')
@@ -108,8 +116,8 @@ export const useGameStore = defineStore('game', () => {
       // 初始化SDK
       EasemobService.initEasemobSDK(appKey.value)
 
-      // 无可用token时先向服务端签发（免密）
-      if (!easemobAccessToken.value) {
+      // 无可用token或已过期时先向服务端签发（免密,自动续期）
+      if (!easemobAccessToken.value || Date.now() >= easemobTokenExpiresAt.value) {
         await getEasemobToken()
       }
 
@@ -118,7 +126,24 @@ export const useGameStore = defineStore('game', () => {
 
       isEasemobConnected.value = true
       console.log('✅ Easemob connected and logged in')
-    } catch (error) {
+    } catch (error: any) {
+      // token 可能已失效(SDK 报错形态不一):清缓存重签一次再试
+      if (easemobAccessToken.value) {
+        console.warn('⚠️ SDK 登录失败,尝试重签 token 重试:', error?.message)
+        easemobAccessToken.value = ''
+        sessionStorage.removeItem('easemobAccessToken')
+        easemobTokenExpiresAt.value = 0
+        sessionStorage.removeItem('easemobTokenExpiresAt')
+        try {
+          await getEasemobToken()
+          await EasemobService.loginEasemob(easemobUser.value, easemobAccessToken.value)
+          isEasemobConnected.value = true
+          console.log('✅ Easemob connected (重签后重试成功)')
+          return
+        } catch (retryErr) {
+          console.error('❌ 重签后重试仍失败:', retryErr?.message)
+        }
+      }
       console.error('❌ Failed to connect Easemob:', error)
       isEasemobConnected.value = false
       throw error
@@ -294,11 +319,29 @@ export const useGameStore = defineStore('game', () => {
       })
       easemobAccessToken.value = res.data.accessToken
       appKey.value = res.data.appKey
+      // 服务端返回真实用户名,回填 easemobUser(SDK 连接必须用真实名,大小写保留)
+      if (res.data.username) {
+        easemobUser.value = res.data.username
+        localStorage.setItem('easemobUser', easemobUser.value)
+      }
+      // 记录过期时间,过期自动重签
+      if (res.data.expiresIn) {
+        easemobTokenExpiresAt.value = Date.now() + res.data.expiresIn * 1000
+        sessionStorage.setItem('easemobTokenExpiresAt', String(easemobTokenExpiresAt.value))
+      }
       // 会话级缓存：刷新免重输密码，关浏览器即失效
       sessionStorage.setItem('easemobAccessToken', easemobAccessToken.value)
       console.log('✅ Easemob user token obtained')
       return res.data
-    } catch (error) {
+    } catch (error: any) {
+      // 403 = 账号在环信不存在/被删除:不再静默降级,明确登出
+      if (error?.response?.status === 403) {
+        console.error('❌ 账号不存在或已被删除:', error.response?.data?.error)
+        alert(error.response?.data?.error || '账号不存在或已被删除,请重新登录')
+        logout()
+        router.push('/login')
+        return
+      }
       console.error('获取环信token失败:', error)
       throw error
     }

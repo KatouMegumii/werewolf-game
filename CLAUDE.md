@@ -18,7 +18,7 @@ H5 在线狼人杀游戏平台:Vue 3 + TS 前端,Express + Socket.io 后端,环�
 - **环信集成(重点)**:
   - 登录:后端 `/api/easemob/token` 用 App Token + `grant_type: inherit` 签发用户 token(免密);前端 `open({user, accessToken})`,token 只存内存+sessionStorage,**密码永不落前端**
   - 群管理:后端 REST 建群/加成员/移除/解散;`room.hostEasemobUser` 是环信群主,**群主不进不参与成员管理**(环信禁止移除群主);**群随房间销毁**:房主解散/最后一人离房/孤儿清扫都调 `destroyEasemobGroup`,失败进 `pendingGroupDestroys` 队列由 30s 清扫兜底重试(404 幂等)
-  - **用户名大小写(约定)**:环信用户名**一律小写**——前端 localStorage 读写规范化 + 后端所有环信调用入口 `normalizeEasemobUsername()` 兜底(见心得 12,新增代码涉及 username 必须遵守)
+  - **用户名大小写(约定,2026-08-07 修正)**:环信用户名**大小写保留**(`testplayer1` 与 `Testplayer1` 是两个独立用户)。策略 = **注册小写(创建规范)+ 登录/后续操作全程真实名(禁止转换)**:登录输入原样验密,后端 GET /users 解析真实名,前端原样存储使用(见心得 12,新增代码涉及 username 必须遵守)
   - **聊天(关键架构)**:发送走**后端 REST 代理**(`POST /api/rooms/:id/message` → 环信 REST `POST /messages`),接收走 **SDK `onTextMessage`**。**不要用 SDK `conn.send` 发群消息**(见心得)。双通道(socket.io 兜底)统一 `pushMessage` 去重(2s 同发送者同内容)
 - **凭证安全**:登录/注册后环信 user token 由后端签发,前端 sessionStorage 缓存,关浏览器失效
 
@@ -37,10 +37,11 @@ H5 在线狼人杀游戏平台:Vue 3 + TS 前端,Express + Socket.io 后端,环�
 8. **阿里云 ECS 直连 GitHub 间歇性不通**:git pull 会无限挂起(光标闪烁无输出)。`curl -m 10 -I https://github.com` 先测;不通时换 ssh 协议/走代理/或本地打包 scp 上传
 9. **房主离开后环信群成员管理**:App Token 不能移除环信群主(403 forbidden_op),群主身份保留到群解散——设计上群主进出房间跳过成员管理
 10. **板子座位数**:`roles` 是 `[{key,name,count}]` 数组,**座位数 = 各角色 count 之和**,不是 roles.length
-12. **环信用户名大小写防御(换头像/昵称"保存成功但重新登录回退"的根因)**:环信 users 实体创建时**强制小写**且 GET 大小写不敏感,但 **metadata 存储/读取是"精确大小写匹配优先,匹配不到才不敏感匹配"**——注册/登录若用输入大小写写 metadata,混合大小写用户名会被劈成大小写两条独立记录,导致读写分裂。**防御(三层,完全覆盖)**:
-    - ① 前端:**localStorage 读取初始化 + `setCurrentUser` 落盘时** `userId/username/easemobUser` 统一 `toLowerCase()`(存量旧会话的大写值一进来就规范化,使用点天然小写,零额外请求)
-    - ② 后端:所有环信调用入口(`login`/`PUT /api/auth/user`/`/api/easemob/token`/建房/入房)统一经 `normalizeEasemobUsername()` 取环信真实名——`GET /users` 大小写不敏感,带缓存;兜底 `Malafafa` 类**存量混合大小写用户**(users 实体原样创建,`toLowerCase()` 会得到错的用户,必须靠 GET 取真实名)
-    - ③ 登录补**密码验证**(`grant_type=password` 换 token,错密码 401):此前 login 只 GET /users 查存在性,**任意密码可登录任意账号**
+12. **环信用户名大小写(换头像/昵称"保存成功但重新登录回退"的根因;2026-08-07 修正前提)**:环信用户名是**大小写保留**的——`testplayer1` 与 `Testplayer1` 是两个独立用户(此前误记"创建时强制小写"已被用户实测推翻)。但 **metadata(昵称/头像)存取大小写敏感**,注册/登录若用不同大小写写 metadata,属性会被劈成大小写两条记录,导致读写分裂。**策略 = 注册小写 + 全程真实名,禁止任何大小写转换**,防御四层:
+    - ① **注册小写(创建规范)**:`/api/auth/register` + 前端注册表单统一 `toLowerCase()`,新用户一律小写,保证 `用户名 == 环信真实名 == metadata key` 一致,不再产生新分裂
+    - ② **登录与后续操作(访问规范)**:登录输入**原样 trim 不转大小写**验密,后端 `GET /users` 解析真实名随响应返回,前端 `setCurrentUser`/`getEasemobToken` **原样存储使用**。曾用 toLowerCase 覆盖真实名,导致大写存量用户登录失败或 SDK user/token 不一致、聊天语音挂掉(已修)
+    - ③ 后端所有环信调用入口(`PUT /api/auth/user`/`/api/easemob/token`/建房/入房)统一经 `normalizeEasemobUsername()` 取环信真实名——`GET /users` 大小写不敏感,带缓存;兜底 `Malafafa` 类**存量混合大小写用户**(必须靠 GET 取真实名,不能自己转)
+    - ④ 登录补**密码验证**(`grant_type=password` 换 token,错密码 401):此前 login 只 GET /users 查存在性,**任意密码可登录任意账号**
 11. **环信群生命周期必须与房间删除绑定,否则环信后台残留群**:房间数据全在内存、环信群在环信服务器持久化,两者不对称。曾有三处泄漏:① 进程重启(pm2/deploy.sh)内存房间全丢,群永久残留(**最大泄漏源**,每次发布就批量残留);② 30s 孤儿清扫删房不删群;③ `destroyEasemobGroup` 失败仅 warn 无重试。修复:删房必删群(含孤儿清扫,去掉空房死角);删群失败进 `pendingGroupDestroys` 重试队列,30s 清扫兜底(404 幂等);**启动清扫**:仅 pm2 生产环境触发,群名统一 `room_{6位房间号}` 前缀过滤(避免误删共用 appkey 的其他群),**先取群快照再 listen**(避免误删新群),`EASEMOB_STARTUP_SWEEP=0` 可禁用,本地 npm run dev 不触发
 
 ## 后续开发指导

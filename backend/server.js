@@ -19,6 +19,51 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ===== 简单内存限流(单 pm2 实例够用;防批量注册/密码爆破)=====
+const rateLimitBuckets = new Map(); // key -> { count, firstAt, lockedUntil }
+
+// nginx 反代后 req.ip 是内网,取 X-Forwarded-For 首值
+function getClientIp(req) {
+  const fwd = req.headers['x-forwarded-for'];
+  if (fwd) return String(fwd).split(',')[0].trim();
+  return req.ip || 'unknown';
+}
+
+// 是否处于锁定期
+function rateLimitIsLocked(key) {
+  const b = rateLimitBuckets.get(key);
+  return !!(b && b.lockedUntil && b.lockedUntil > Date.now());
+}
+
+// 计数一次;超过 limit 且 lockMs>0 时锁定。窗口过期自动重置。返回 { allowed }
+function rateLimitHit(key, limit, windowMs, lockMs = 0) {
+  const now = Date.now();
+  let b = rateLimitBuckets.get(key);
+  if (!b || now - b.firstAt > windowMs) {
+    b = { count: 1, firstAt: now, lockedUntil: 0 };
+    rateLimitBuckets.set(key, b);
+    return { allowed: true };
+  }
+  if (b.lockedUntil > now) return { allowed: false };
+  b.count += 1;
+  if (b.count >= limit && lockMs > 0) {
+    b.lockedUntil = now + lockMs;
+    return { allowed: false };
+  }
+  if (b.count > limit) return { allowed: false };
+  return { allowed: true };
+}
+
+// 周期性清理过期限流桶,防止 Map 无限增长
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, b] of rateLimitBuckets.entries()) {
+    if (now - b.firstAt > 10 * 60_000 && (!b.lockedUntil || b.lockedUntil < now)) {
+      rateLimitBuckets.delete(key);
+    }
+  }
+}, 60_000);
+
 // 创建 HTTP 服务器和 Socket.io 实例
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
@@ -197,11 +242,10 @@ async function destroyEasemobGroup(groupId) {
 
 /**
  * 用户注册 - 通过REST API在环信创建新用户
+ * 注册统一小写 = 创建规范:新用户一律小写,保证 用户名 == 环信真实名 == metadata key 一致
+ * (metadata 存取"精确大小写匹配优先",大小写混用会把属性劈成两条记录 → 换头像"保存成功但重登回退")
  */
 app.post('/api/auth/register', async (req, res) => {
-  // 用户名统一小写：环信 users 实体创建时强制小写、metadata 却大小写敏感，
-  // 若注册时保留输入大小写，metadata 会被劈成大小写两条记录(登录读大写旧值、修改写小写 → 永远"保存后回退")。
-  // 新用户一律小写，与环信真实用户名对齐
   const username = String(req.body.username || '').toLowerCase();
   const { nickname, password } = req.body;
 
@@ -209,37 +253,47 @@ app.post('/api/auth/register', async (req, res) => {
     return res.status(400).json({ error: '用户名、昵称和密码不能为空' });
   }
 
-  try {
-    // 第1步: 获取管理员token (App Token)
-    console.log('获取App Token...');
-    const appTokenRes = await axios.post(
-      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/token`,
-      {
-        grant_type: 'client_credentials',
-        client_id: EASEMOB_CONFIG.clientId,
-        client_secret: EASEMOB_CONFIG.clientSecret
-      }
-    );
+  // 后端校验(防直调 API 绕过前端校验)
+  if (!/^[a-zA-Z0-9]+$/.test(username)) {
+    return res.status(400).json({ error: '账号只能包含英文和数字' });
+  }
+  if (String(password).length < 6) {
+    return res.status(400).json({ error: '密码至少6位' });
+  }
 
-    const appToken = appTokenRes.data.access_token;
-    console.log('✅ App token obtained');
+  try {
+    // 注册限流:10次/分钟/IP(防批量注册)
+    if (!rateLimitHit(`reg:${getClientIp(req)}`, 10, 60_000).allowed) {
+      return res.status(429).json({ error: '操作太频繁,请稍后再试' });
+    }
+
+    // 第1步: 获取App Token(统一走 getAppToken,带缓存与401自愈)
+    const appToken = await getAppToken();
 
     // 第2步: 创建用户 - 这是用户在Easemob中的独立账户
     console.log(`正在创建用户: ${username}...`);
-    const createUserRes = await axios.post(
-      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/users`,
-      {
-        username: username,
-        password: password
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${appToken}`,
-          'Content-Type': 'application/json'
+    try {
+      await axios.post(
+        `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/users`,
+        {
+          username: username,
+          password: password
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${appToken}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 15_000
         }
+      );
+    } catch (err) {
+      // 用户名已存在:环信返回 "user already exist" 类错误 → 友好提示
+      if (/exist/i.test(JSON.stringify(err.response?.data || ''))) {
+        return res.status(409).json({ error: '用户名已被注册' });
       }
-    );
-
+      throw err;
+    }
     console.log('✅ User created successfully in Easemob');
 
     // 第3步: 生成随机头像
@@ -262,12 +316,31 @@ app.post('/api/auth/register', async (req, res) => {
           headers: {
             'Authorization': `Bearer ${appToken}`,
             'Content-Type': 'application/x-www-form-urlencoded'
-          }
+          },
+          timeout: 15_000
         }
       );
       console.log(`✅ 用户属性已设置到环信: nickname=${nickname}, avatar=${randomAvatar}`);
     } catch (err) {
       console.warn(`⚠️ 设置用户属性失败:`, err.response?.status, err.response?.data);
+    }
+
+    // 第5步: 签发用户Token(grant_type=inherit,免密),注册即登录,前端不再等进房间
+    let accessToken = '';
+    let expiresIn = 0;
+    try {
+      const inheritRes = await axios.post(
+        `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/token`,
+        { grant_type: 'inherit', username, autoCreateUser: false, ttl: 7 * 24 * 3600 },
+        {
+          headers: { 'Authorization': `Bearer ${appToken}`, 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          timeout: 15_000
+        }
+      );
+      accessToken = inheritRes.data.access_token;
+      expiresIn = inheritRes.data.expires_in || 7 * 24 * 3600;
+    } catch (err) {
+      console.warn('⚠️ 注册后签发token失败(不影响注册,进房间时会重签):', err.response?.status, err.message);
     }
 
     res.json({
@@ -277,7 +350,8 @@ app.post('/api/auth/register', async (req, res) => {
       avatar: randomAvatar,
       appKey: EASEMOB_CONFIG.appKey,
       easemobUser: username,
-      easemobPassword: password,
+      accessToken,
+      expiresIn,
       message: '用户创建成功'
     });
 
@@ -295,60 +369,70 @@ app.post('/api/auth/register', async (req, res) => {
 
 /**
  * 用户登录 - 验证用户凭证并返回环信连接信息
+ * 输入原样 trim 不转大小写:环信用户名大小写保留,存量大写用户必须用原样验密;
+ * 真实名以后端 GET /users 返回为准(大小写不敏感),后续所有操作都用真实名
  */
 app.post('/api/auth/login', async (req, res) => {
-  const { username, password } = req.body;
+  const username = String(req.body.username || '').trim();
+  const { password } = req.body;
 
   if (!username || !password) {
     return res.status(400).json({ error: '用户名和密码不能为空' });
   }
 
-  try {
-    // 第1步: 获取管理员token (App Token)
-    console.log('获取App Token...');
-    const appTokenRes = await axios.post(
-      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/token`,
-      {
-        grant_type: 'client_credentials',
-        client_id: EASEMOB_CONFIG.clientId,
-        client_secret: EASEMOB_CONFIG.clientSecret
-      }
-    );
+  // 登录失败锁定:5次/5分钟锁(按 IP+用户名),防密码爆破
+  const failKey = `login:${getClientIp(req)}:${username.toLowerCase()}`;
+  if (rateLimitIsLocked(failKey)) {
+    return res.status(429).json({ error: '尝试次数过多,请5分钟后再试' });
+  }
 
-    const appToken = appTokenRes.data.access_token;
-    console.log('✅ App token obtained');
+  try {
+    // 第1步: 获取App Token(统一走 getAppToken,带缓存与401自愈)
+    const appToken = await getAppToken();
 
     // 第2步: 验证用户密码(环信标准方式:grant_type=password 换用户token,密码错误返回 400/401)
     // 修复安全漏洞:此前只 GET /users 查存在性,任意密码都能登录
+    // 该响应本身就是用户token,直接随登录响应返回(省一次 /api/easemob/token 往返)
+    let userToken = '';
+    let userTokenExpiresIn = 0;
     console.log(`验证用户密码: ${username}...`);
     try {
-      await axios.post(
+      const tokenRes = await axios.post(
         `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/token`,
-        { grant_type: 'password', username, password }
+        { grant_type: 'password', username, password },
+        { timeout: 15_000 }
       );
       console.log('✅ 密码验证通过');
+      userToken = tokenRes.data.access_token || '';
+      userTokenExpiresIn = tokenRes.data.expires_in || 0;
     } catch (err) {
       console.warn('❌ 密码验证失败:', err.response?.status, err.response?.data?.error_description || err.message);
-      return res.status(401).json({
-        error: '密码错误或用户不存在',
-        details: err.response?.data
-      });
+      // 失败计数:满5次锁5分钟
+      rateLimitHit(failKey, 5, 5 * 60_000, 5 * 60_000);
+      return res.status(401).json({ error: '账号或密码错误' });
     }
 
-    // 第3步: 获取环信真实用户名——users 实体创建时强制小写、GET 大小写不敏感,
+    // 第3步: 获取环信真实用户名——环信用户名大小写保留,GET 大小写不敏感,
     // 但 metadata 存储/读取是大小写敏感的(曾把 testplayer1 与 Testplayer1 劈成两条记录,
     // 导致换头像/昵称"保存成功但重新登录回退")。此后所有读写一律用真实用户名
-    const userRes = await axios.get(
-      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/users/${username}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${appToken}`,
-          'Content-Type': 'application/json'
+    let realUsername = username;
+    try {
+      const userRes = await axios.get(
+        `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/users/${username}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${appToken}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 15_000
         }
-      }
-    );
-    const realUsername = userRes.data?.entities?.[0]?.username || username;
-    console.log('✅ 用户验证通过, 真实用户名:', realUsername);
+      );
+      realUsername = userRes.data?.entities?.[0]?.username || username;
+      console.log('✅ 用户验证通过, 真实用户名:', realUsername);
+    } catch (err) {
+      console.warn('❌ 获取用户失败(验密通过但查询失败):', err.response?.status, err.message);
+      return res.status(401).json({ error: '账号或密码错误' });
+    }
 
     // 第4步: 获取用户属性（可选的，失败不影响登录）
     let userNickname = realUsername;
@@ -406,7 +490,8 @@ app.post('/api/auth/login', async (req, res) => {
       avatar: userAvatar,
       appKey: EASEMOB_CONFIG.appKey,
       easemobUser: realUsername,
-      easemobPassword: password,
+      accessToken: userToken,
+      expiresIn: userTokenExpiresIn,
       message: '登录成功'
     });
 
@@ -888,24 +973,15 @@ app.put('/api/auth/user/:username', async (req, res) => {
     // (users GET 大小写不敏感、metadata 敏感——不规范化会读写到分裂的错误记录)
     username = await normalizeEasemobUsername(username);
 
-    // 获取App Token
-    const appTokenRes = await axios.post(
-      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/token`,
-      {
-        grant_type: 'client_credentials',
-        client_id: EASEMOB_CONFIG.clientId,
-        client_secret: EASEMOB_CONFIG.clientSecret
-      }
-    );
-
-    const appToken = appTokenRes.data.access_token;
+    // 获取App Token(统一走 getAppToken,带缓存与401自愈)
+    const appToken = await getAppToken();
     console.log(`更新用户 ${username} 的属性...`);
 
     // 先获取当前用户属性以获取现有的ext
     let currentExt = {};
     try {
       const getRes = await axios.get(
-        `http://ngi-a1.easemob.com/1196260703193552/langrensha/metadata/user/${username}`,
+        `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/metadata/user/${username}`,
         {
           headers: {
             'Authorization': `Bearer ${appToken}`,
@@ -953,7 +1029,7 @@ app.put('/api/auth/user/:username', async (req, res) => {
       try {
         const attrData = qs.stringify(updateData);
         updateRes = await axios.put(
-          `http://ngi-a1.easemob.com/1196260703193552/langrensha/metadata/user/${username}`,
+          `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/metadata/user/${username}`,
           attrData,
           {
             headers: {
@@ -1023,38 +1099,42 @@ app.post('/api/easemob/token', async (req, res) => {
     username = await normalizeEasemobUsername(username);
     console.log(`✅ 为玩家 ${playerName} (${username}) 签发Easemob Token`);
 
-    // 第1步: 获取App Token
-    const appTokenRes = await axios.post(
-      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/token`,
-      {
-        grant_type: 'client_credentials',
-        client_id: EASEMOB_CONFIG.clientId,
-        client_secret: EASEMOB_CONFIG.clientSecret
-      }
-    );
-    const appToken = appTokenRes.data.access_token;
+    // 第1步: 获取App Token(统一走 getAppToken,带缓存与401自愈)
+    const appToken = await getAppToken();
 
     // 第2步: 获取用户Token（环信REST: POST /token + grant_type=inherit，App Token签发，免密）
     // 文档: https://docs-im.easemob.com/ccim/rest/usertoken
-    const userTokenRes = await axios.post(
-      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/token`,
-      {
-        grant_type: 'inherit',
-        username,
-        autoCreateUser: false,
-        ttl: 7 * 24 * 3600
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${appToken}`,
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
+    let accessToken;
+    let expiresIn = 7 * 24 * 3600;
+    try {
+      const userTokenRes = await axios.post(
+        `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/token`,
+        {
+          grant_type: 'inherit',
+          username,
+          autoCreateUser: false,
+          ttl: 7 * 24 * 3600
+        },
+        {
+          headers: {
+            'Authorization': `Bearer ${appToken}`,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          timeout: 15_000
         }
+      );
+      accessToken = userTokenRes.data.access_token;
+      expiresIn = userTokenRes.data.expires_in || 7 * 24 * 3600;
+    } catch (err) {
+      // 用户不存在(autoCreateUser:false 时未注册用户会报错)→ 403,前端据此登出,
+      // 不再静默降级成"环信可选"——否则伪造/残留会话会以 socket 兜底继续玩
+      const errText = JSON.stringify(err.response?.data || '') + (err.response?.status || '');
+      if (err.response?.status === 404 || /not exist|doesn'?t exist|不存在/i.test(errText)) {
+        return res.status(403).json({ error: '账号不存在或已被删除,请重新登录' });
       }
-    );
-
-    const accessToken = userTokenRes.data.access_token;
-    const expiresIn = userTokenRes.data.expires_in || 7 * 24 * 3600;
+      throw err;
+    }
 
     res.json({
       username,
