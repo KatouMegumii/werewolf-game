@@ -53,6 +53,7 @@ H5 在线狼人杀游戏平台:Vue 3 + TS 前端,Express + Socket.io 后端,环�
    - `db.js` 的 boards 表只有板子,房间数据全在内存(重启即丢)——规模大了换数据库持久化
 4. **开发约定**:
    - 改 `backend/.env` 后**必须重启后端**(dotenv 启动时读一次,nodemon 不会因 .env 变化重载)
+   - **改动做完由 Claude 直接 `git commit`**(需 push 时也顺手做)——线上 `deploy.sh` 靠 `git pull` 部署,**未提交的改动永远不会上线**(曾因漏提交 ext 改动导致线上跑旧代码、误判环信 ext 不透传,浪费一轮排查)
    - 前端改动 → 本地 `npm run build` 验证 → 云上 `./deploy.sh`;浏览器强刷(无痕窗口)排除缓存
    - 环信 REST 端点(建群/加成员/消息)都以 `ngi-a1.easemob.com` 为前缀,`getAppToken()` 有缓存
    - 本地开发:后端 `npm run dev`(3000),前端 `npm run dev`(5173),本地 PG(Homebrew postgresql@16,库 werewolf,用户 dingyi 免密)

@@ -50,22 +50,44 @@ const players = new Map();
 
 // App Token 缓存（有效期约7天，提前1分钟过期重新获取）
 let appTokenCache = { token: null, expiresAt: 0 };
+// 防重入:401 强制刷新时避免并发循环
+let appTokenRefreshing = false;
 
 async function getAppToken() {
   if (appTokenCache.token && Date.now() < appTokenCache.expiresAt - 60_000) {
     return appTokenCache.token;
   }
-  const res = await axios.post(
-    `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/token`,
-    {
-      grant_type: 'client_credentials',
-      client_id: EASEMOB_CONFIG.clientId,
-      client_secret: EASEMOB_CONFIG.clientSecret
+  const refreshToken = async () => {
+    const res = await axios.post(
+      `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/token`,
+      {
+        grant_type: 'client_credentials',
+        client_id: EASEMOB_CONFIG.clientId,
+        client_secret: EASEMOB_CONFIG.clientSecret
+      },
+      { timeout: 15_000 }
+    );
+    appTokenCache = { token: res.data.access_token, expiresAt: Date.now() + res.data.expires_in * 1000 };
+    console.log('✅ App Token refreshed');
+    return appTokenCache.token;
+  };
+  try {
+    return await refreshToken();
+  } catch (err) {
+    // 401:缓存 token 被吊销(如控制台重置凭证),清缓存强制重试一次,
+    // 否则 7 天窗口内所有环信操作(含删群)持续 401,重试队列也全失败
+    if (err.response?.status === 401 && !appTokenRefreshing) {
+      appTokenRefreshing = true;
+      appTokenCache = {};
+      try {
+        const token = await refreshToken();
+        return token;
+      } finally {
+        appTokenRefreshing = false;
+      }
     }
-  );
-  appTokenCache = { token: res.data.access_token, expiresAt: Date.now() + res.data.expires_in * 1000 };
-  console.log('✅ App Token refreshed');
-  return appTokenCache.token;
+    throw err;
+  }
 }
 
 // 环信真实用户名缓存: 输入大小写 -> 环信存储的真实名(小写)
@@ -84,7 +106,7 @@ async function normalizeEasemobUsername(username) {
     const appToken = await getAppToken();
     const res = await axios.get(
       `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/users/${username}`,
-      { headers: { 'Authorization': `Bearer ${appToken}` } }
+      { headers: { 'Authorization': `Bearer ${appToken}` }, timeout: 15_000 }
     );
     const real = res.data?.entities?.[0]?.username || username;
     usernameAliasCache.set(username, real);
@@ -108,7 +130,8 @@ async function createEasemobGroup(owner, name, description) {
       maxusers: 200
     },
     {
-      headers: { 'Authorization': `Bearer ${appToken}`, 'Content-Type': 'application/json' }
+      headers: { 'Authorization': `Bearer ${appToken}`, 'Content-Type': 'application/json' },
+      timeout: 15_000
     }
   );
   return res.data?.data?.groupid;
@@ -121,7 +144,8 @@ async function addEasemobGroupMember(groupId, username) {
     `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/chatgroups/${groupId}/users`,
     { usernames: [username] },
     {
-      headers: { 'Authorization': `Bearer ${appToken}`, 'Content-Type': 'application/json' }
+      headers: { 'Authorization': `Bearer ${appToken}`, 'Content-Type': 'application/json' },
+      timeout: 15_000
     }
   );
 }
@@ -133,7 +157,7 @@ async function removeEasemobGroupMember(groupId, username) {
     const appToken = await getAppToken();
     await axios.delete(
       `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/chatgroups/${groupId}/users/${username}`,
-      { headers: { 'Authorization': `Bearer ${appToken}` } }
+      { headers: { 'Authorization': `Bearer ${appToken}` }, timeout: 15_000 }
     );
   } catch (err) {
     console.warn(`⚠️ 移除环信群成员 ${username} 失败:`, err.response?.status, JSON.stringify(err.response?.data) || err.message);
@@ -149,9 +173,11 @@ async function destroyEasemobGroup(groupId) {
   if (pendingGroupDestroys.has(groupId)) return; // 已在重试队列，避免并发重复删除
   try {
     const appToken = await getAppToken();
+    // timeout 必须有:该集群已有无限挂起前科(SDK send),挂起的 DELETE 既不成功也不报错,
+    // 不进重试队列 → 群永久残留。15s 超时后报错 → 进 pendingGroupDestroys → 30s 清扫重试
     await axios.delete(
       `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/chatgroups/${groupId}`,
-      { headers: { 'Authorization': `Bearer ${appToken}` } }
+      { headers: { 'Authorization': `Bearer ${appToken}` }, timeout: 15_000 }
     );
     console.log(`🗑️ 环信群 ${groupId} 已解散`);
   } catch (err) {
@@ -160,7 +186,8 @@ async function destroyEasemobGroup(groupId) {
       console.log(`🗑️ 环信群 ${groupId} 不存在（已解散），跳过`);
       return;
     }
-    console.warn(`⚠️ 解散环信群 ${groupId} 失败(将进入重试队列，30s清扫兜底):`, err.response?.status, err.response?.data?.error || err.message);
+    console.warn(`⚠️ 解散环信群 ${groupId} 失败(将进入重试队列，30s清扫兜底):`,
+      err.response?.status, err.response?.data?.error || err.code || err.message);
     pendingGroupDestroys.add(groupId);
   }
 }
@@ -731,9 +758,9 @@ app.put('/api/rooms/:roomId/settings', (req, res) => {
  */
 app.post('/api/rooms/:roomId/message', async (req, res) => {
   const { roomId } = req.params;
-  const { playerName, message } = req.body;
+  const { playerId, playerName, message, localId } = req.body;
 
-  if (!playerName || !message) {
+  if (!message) {
     return res.status(400).json({ error: '缺少消息内容' });
   }
 
@@ -745,7 +772,10 @@ app.post('/api/rooms/:roomId/message', async (req, res) => {
     return res.status(400).json({ error: '环信群不可用' });
   }
 
-  const player = room.players.map(pid => players.get(pid)).find(p => p && p.name === playerName);
+  // 按 playerId 定位发送人(防同名玩家消息冒名);旧客户端无 playerId 时按昵称兜底
+  const player = room.players
+    .map(pid => players.get(pid))
+    .find(p => p && (playerId ? p.playerId === playerId : p.name === playerName));
   if (!player) {
     return res.status(403).json({ error: '玩家不在房间中' });
   }
@@ -758,13 +788,16 @@ app.post('/api/rooms/:roomId/message', async (req, res) => {
         target_type: 'chatgroups',
         target: [room.easemobGroupId],
         msg: { type: 'txt', msg: message },
-        from: player.easemobUser
+        from: player.easemobUser,
+        // ext 透传发送人身份与本地消息ID:接收端 onTextMessage 用 ext.localId 认领乐观消息去重
+        ext: { playerId: player.playerId, playerName: player.name, localId: localId || '' }
       },
       {
-        headers: { 'Authorization': `Bearer ${appToken}`, 'Content-Type': 'application/json' }
+        headers: { 'Authorization': `Bearer ${appToken}`, 'Content-Type': 'application/json' },
+        timeout: 15_000
       }
     );
-    console.log(`📤 REST群消息发送成功: ${playerName}: ${message}`);
+    console.log(`📤 REST群消息发送成功: ${player.name}: ${message}`);
     res.json({ ok: true });
   } catch (error) {
     console.error('❌ REST发送群消息失败:', error.response?.status, error.response?.data?.error_description || error.message);
@@ -1190,6 +1223,39 @@ setInterval(() => {
   }
 }, 30_000);
 
+// 快照清扫是否启用:生产(pm2环境)默认开,本地dev默认关,EASEMOB_STARTUP_SWEEP=0 强制关
+const snapshotSweepEnabled = process.env.EASEMOB_STARTUP_SWEEP !== '0'
+  && (process.env.PM2_HOME || process.env.NODE_APP_INSTANCE !== undefined);
+
+// 周期快照清扫(5min,仅生产):直接对比环信后台群快照与当前 live 房间,
+// 凡 room_xxxxxx 前缀且不在 live 里的群一律解散 —— 兜住删群挂起/groupid解析失败/进程重启等一切漏删路径。
+// 不依赖任何删群路径是否成功;删除失败仍进 pendingGroupDestroys 由 30s 清扫重试
+if (snapshotSweepEnabled) {
+  setInterval(async () => {
+    let groups;
+    try {
+      groups = await snapshotEasemobGroups();
+    } catch (err) {
+      console.warn('⚠️ 周期清扫:获取环信群列表失败(5分钟后再试):', err.message);
+      return;
+    }
+    const liveGroupIds = new Set([...rooms.values()].map(r => r.easemobGroupId).filter(Boolean));
+    const orphans = groups.filter(g => {
+      if (!/^room_\d{6}$/.test(g.groupname || '')) return false;
+      if (liveGroupIds.has(g.groupid)) return false;
+      // 跳过刚创建的群:建群→房间入map有瞬态窗口(2分钟内),5分钟粒度下窗口极小
+      if (g.created) {
+        const createdMs = typeof g.created === 'number' && g.created < 1e12 ? g.created * 1000 : g.created;
+        if (Date.now() - new Date(createdMs).getTime() < 2 * 60_000) return false;
+      }
+      return true;
+    });
+    if (!orphans.length) return;
+    console.log(`🧹 周期清扫:发现 ${orphans.length} 个无主环信群,开始解散...`);
+    orphans.forEach(g => destroyEasemobGroup(g.groupid));
+  }, 5 * 60_000);
+}
+
 io.on('connection', (socket) => {
   console.log(`✅ 客户端连接: ${socket.id}`);
 
@@ -1248,7 +1314,7 @@ io.on('connection', (socket) => {
 
   // 玩家发送聊天消息
   socket.on('sendMessage', (data) => {
-    const { roomId, playerName, message } = data;
+    const { roomId, message, localId } = data;
     const socketInfo = socketToPlayer.get(socket.id);
 
     if (!socketInfo || socketInfo.roomId !== roomId) {
@@ -1256,12 +1322,13 @@ io.on('connection', (socket) => {
       return;
     }
 
-    console.log(`💬 房间 ${roomId} - ${playerName}: ${message}`);
+    console.log(`💬 房间 ${roomId} - ${socketInfo.playerName}: ${message}`);
 
-    // 广播消息到房间内所有人
+    // 广播消息到房间内所有人(昵称用入房时鉴权记录的,不信客户端自报;带localId供接收端认领去重)
     io.to(roomId).emit('receiveMessage', {
-      playerName,
+      playerName: socketInfo.playerName,
       message,
+      localId: localId || '',
       timestamp: new Date(),
       type: 'player'
     });
@@ -1546,12 +1613,8 @@ function sweepOrphanEasemobGroups(groups) {
 }
 
 async function bootstrap() {
-  // 启动清扫是否启用：生产(pm2环境)默认开，本地dev默认关，EASEMOB_STARTUP_SWEEP=0 强制关
-  const startupSweepEnabled = process.env.EASEMOB_STARTUP_SWEEP !== '0'
-    && (process.env.PM2_HOME || process.env.NODE_APP_INSTANCE !== undefined);
-
   let orphanSnapshot = [];
-  if (startupSweepEnabled) {
+  if (snapshotSweepEnabled) {
     try {
       // 先取群快照再监听：快照之后的房间是"活着"的新群，不能被启动清扫误删
       orphanSnapshot = await snapshotEasemobGroups();

@@ -167,6 +167,8 @@ export const useGameStore = defineStore('game', () => {
         // 环信消息from是小写用户名,与注册时的easemobUser大小写可能不同,比较时忽略大小写
         const displayName = playerList.value.find(p => p.easemobUser?.toLowerCase() === fromUser?.toLowerCase())?.name || fromUser
         pushMessage({
+          // 后端REST转发时透传 ext.localId,与发送方乐观消息同ID → pushMessage按ID认领去重
+          localId: message.ext?.localId,
           type: 'easemob',
           from: displayName,
           text: message.msg || message.content,
@@ -430,6 +432,8 @@ export const useGameStore = defineStore('game', () => {
     socket.on('receiveMessage', (data: any) => {
       console.log('💬 接收消息:', data)
       pushMessage({
+        // 后端广播带 localId,与发送方乐观消息同ID → pushMessage按ID认领去重
+        localId: data.localId,
         type: data.type || 'player',
         from: data.playerName,
         text: data.message,
@@ -525,9 +529,17 @@ export const useGameStore = defineStore('game', () => {
   }
 
   // 发送聊天消息
-  // 双通道消息去重:2秒内同发送者同内容视为重复(socket广播与环信回推可能同时到达);
-  // 时间戳任一非法时直接按"同发送者同内容"去重(双通道回显场景,内容相同即重复)
+  // 双通道消息去重:带 localId 的消息(乐观消息/socket广播)按 ID 认领——同 ID 已存在则丢弃,自身直接上屏;
+  // 无 localId 的消息(环信回显)兜底用时间窗:5s内同发送者同内容视为重复(socket广播与环信回推可能同时到达);
+  // 时间戳任一非法时直接按"同发送者同内容"去重(双通道回显场景,内容相同即重复)。
+  // 注意:带 localId 的消息不走时间窗——时间窗会把 5s 内重复发送的同文本(如连发两条"哈哈")误合并
   function pushMessage(msg: any) {
+    // 同一 localId 已存在 = 同一条消息的乐观显示/回显(环信ext或socket广播带localId),认领不新增
+    if (msg.localId && messages.value.some(m => m.localId && m.localId === msg.localId)) return
+    if (msg.localId) {
+      messages.value.push(msg)
+      return
+    }
     const t = new Date(msg.timestamp).getTime()
     const dup = messages.value.some(m => {
       if (m.from !== msg.from || m.text !== msg.text) return false
@@ -543,8 +555,13 @@ export const useGameStore = defineStore('game', () => {
   // 发送聊天消息：后端REST发环信群消息(SDK send在4.24+当前集群下等回执挂死)，
   // 接收端用SDK onTextMessage收；REST失败时降级socket.io(双通道在接收端去重)
   function sendMessage(message: string) {
+    // 本地消息ID：乐观消息与回显(环信ext/socket广播)共用同一ID,接收端按ID认领去重
+    // (不靠"同发送者同内容+时间窗"猜重——真机时钟偏移或from映射失败都会漏)
+    const localId = `${playerId.value || 'anon'}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
     // 乐观显示自己的消息
     pushMessage({
+      localId,
       type: 'player',
       from: playerName.value,
       text: message,
@@ -552,21 +569,25 @@ export const useGameStore = defineStore('game', () => {
     })
 
     api.post(`/api/rooms/${roomId.value}/message`, {
+      playerId: playerId.value,
       playerName: playerName.value,
-      message
+      message,
+      localId
     }).catch((err) => {
       console.warn('⚠️ REST群消息发送失败，降级Socket:', err?.message)
-      sendSocketMessage(message)
+      sendSocketMessage(message, localId)
     })
   }
 
   // 通过Socket发送（游戏状态/降级通道）
-  function sendSocketMessage(message: string) {
+  function sendSocketMessage(message: string, localId?: string) {
     if (!socket || !roomId.value) return
     socket.emit('sendMessage', {
       roomId: roomId.value,
+      playerId: playerId.value,
       playerName: playerName.value,
-      message
+      message,
+      localId
     })
   }
 
