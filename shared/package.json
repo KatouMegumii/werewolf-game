@@ -1,0 +1,5 @@
+{
+  "name": "werewolf-shared",
+  "private": true,
+  "type": "module"
+}

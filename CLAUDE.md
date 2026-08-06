@@ -61,6 +61,7 @@ H5 在线狼人杀游戏平台:Vue 3 + TS 前端,Express + Socket.io 后端,环�
 ## 关键文件索引
 
 - `backend/server.js` — 全部业务:auth/rooms/房主/环信REST/socket 事件
+- `shared/boardUtils.js` — 座位数计算**唯一实现**(前后端共用,shared/package.json 声明 type:module;改规则只改这里)
 - `frontend/src/stores/gameStore.ts` — Pinia 状态:登录凭证、房间、socket、环信、消息(pushMessage 去重)
 - `frontend/src/api/easemob.ts` — SDK 封装:token 登录、群消息收发(onTextMessage)、消息 create
 - `frontend/src/views/Room.vue` — 房间 UI:座位区(renderTick 强制重建)、聊天、设置面板

@@ -38,7 +38,7 @@
         </div>
         <div class="card-badges">
           <span class="badge">{{ board.gameConfig?.cardType || '单身份' }}</span>
-          <span class="player-count">{{ getPlayerCount(board) }}人</span>
+          <span class="player-count">{{ calcBoardPlayerCount(board.roles, board.gameConfig?.cardType) }}人</span>
         </div>
         <div class="card-content">
           {{ board.summary }}
@@ -308,6 +308,7 @@ import { ref, computed, onMounted } from 'vue'
 import { Heart, Edit2, Trash2, Info, ChevronLeft, X } from 'lucide-vue-next'
 import AppLayout from '../components/AppLayout.vue'
 import api from '../api/client'
+import { calcBoardPlayerCount } from '../../../shared/boardUtils.js' // 座位数唯一实现(与后端建房共用同一公式)
 
 const showToast = ref(false)
 const toastMessage = ref('')
@@ -498,36 +499,9 @@ function decrementRole(boardIndex: number, roleKey: string) {
   }
 }
 
-function getTotalPlayers(board: Board): number {
-  return board.roles.reduce((sum, role) => sum + role.count, 0)
-}
-
-function getTotalWolves(board: Board): number {
-  return board.roles.filter(r => r.category === '狼人').reduce((sum, role) => sum + role.count, 0)
-}
-
-function getTotalGood(board: Board): number {
-  return getTotalPlayers(board) - getTotalWolves(board)
-}
-
 function updateBoardSummary(board: Board) {
   const roleNames = board.roles.map(r => `${r.name}×${r.count}`).join(' ')
   board.summary = roleNames || '未配置'
-}
-
-function getPlayerCount(board: Board): number {
-  const total = board.roles.reduce((sum, role) => sum + role.count, 0)
-  const hasThief = board.roles.some(r => r.key === 'thief')
-
-  if (total === 0) return 0
-
-  const baseCount = hasThief ? total - 2 : total
-  const cardType = board.gameConfig?.cardType || '单身份'
-
-  if (cardType === '双身份') {
-    return Math.floor(baseCount / 2)
-  }
-  return baseCount
 }
 
 function createNewBoard() {

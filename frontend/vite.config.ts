@@ -6,6 +6,8 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5173,
-    allowedHosts: ['langrensha.jxjhlrs.fun']
+    allowedHosts: ['langrensha.jxjhlrs.fun'],
+    // 允许 dev 服务器读取仓库根的 shared/ 共享模块(座位数计算唯一实现)
+    fs: { allow: ['..'] }
   }
 })

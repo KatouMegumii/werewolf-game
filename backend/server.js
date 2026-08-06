@@ -8,6 +8,7 @@ import qs from 'qs';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { initDb, getDb } from './db.js';
+import { calcBoardPlayerCount } from '../shared/boardUtils.js'; // 座位数计算唯一实现(与前端共用)
 
 dotenv.config();
 
@@ -485,12 +486,8 @@ app.post('/api/rooms', async (req, res) => {
         }
         const roles = JSON.parse(boardRow.roles);
         if (Array.isArray(roles) && roles.length > 0) {
-          // 座位数 = 各角色count之和,且与前端 Config.vue getPlayerCount 保持一致:
-          // 含盗贼 -2(盗贼拿两张牌选一张,两张牌不发给玩家),双身份再 ÷2(每人两张身份)
-          const totalCards = roles.reduce((sum, role) => sum + (Number(role.count) || 1), 0);
-          const hasThief = roles.some(r => r.key === 'thief');
-          const baseCount = hasThief ? totalCards - 2 : totalCards;
-          const playerCount = boardGameConfig?.cardType === '双身份' ? Math.floor(baseCount / 2) : baseCount;
+          // 座位数唯一实现在 shared/boardUtils.js(与前端板子列表"X人"显示共用同一公式)
+          const playerCount = calcBoardPlayerCount(roles, boardGameConfig?.cardType);
           if (playerCount > 0) {
             maxPlayers = playerCount;
           }
