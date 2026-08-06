@@ -8,7 +8,7 @@ H5 在线狼人杀游戏平台:Vue 3 + TS 前端,Express + Socket.io 后端,环�
 - `frontend/` — Vue 3 + Pinia + Vite,页面:`Login` / `Lobby`(大厅) / `Config`(板子配置) / `Room`(游戏房间)
 - 部署(云服务器 `/root/werewolf-game`,需先 `chmod o+x /root` 否则 Nginx 500):后端 pm2(`werewolf-backend`),前端 Nginx 服务 `frontend/dist`(配置模板在 `deploy/nginx-werewolf.conf`),发布 = 服务器上执行 `./deploy.sh`:`git pull`(网络不稳重试一次)→ 后端 `npm install` + `pm2 restart werewolf-backend`(无则 `pm2 start server.js --name "werewolf-backend"`)→ 前端 `npm install` + `npm run build`
 - **注意:每次发布都会 pm2 重启后端 → 内存房间全部丢失**(房间数据在内存,重启后不可恢复),遗留环信群靠启动清扫自动解散(见心得 11)
-- 线上地址:http://langrensha.jxjhlrs.fun(https 未配;`backend/.env` 有环信凭证,勿提交——已在 .gitignore)
+- 线上地址:https://langrensha.jxjhlrs.fun(https 已配,certbot;`backend/.env` 有环信凭证,勿提交——已在 .gitignore)
 
 ## 架构要点(当前实现)
 
@@ -43,6 +43,7 @@ H5 在线狼人杀游戏平台:Vue 3 + TS 前端,Express + Socket.io 后端,环�
     - ③ 后端所有环信调用入口(`PUT /api/auth/user`/`/api/easemob/token`/建房/入房)统一经 `normalizeEasemobUsername()` 取环信真实名——`GET /users` 大小写不敏感,带缓存;兜底存量混合大小写记录(必须靠 GET 取真实名,不能自己转)
     - ④ 登录补**密码验证**(`grant_type=password` 换 token,错密码 401):此前 login 只 GET /users 查存在性,**任意密码可登录任意账号**
 11. **环信群生命周期必须与房间删除绑定,否则环信后台残留群**:房间数据全在内存、环信群在环信服务器持久化,两者不对称。曾有三处泄漏:① 进程重启(pm2/deploy.sh)内存房间全丢,群永久残留(**最大泄漏源**,每次发布就批量残留);② 30s 孤儿清扫删房不删群;③ `destroyEasemobGroup` 失败仅 warn 无重试。修复:删房必删群(含孤儿清扫,去掉空房死角);删群失败进 `pendingGroupDestroys` 重试队列,30s 清扫兜底(404 幂等);**启动清扫**:仅 pm2 生产环境触发,群名统一 `room_{6位房间号}` 前缀过滤(避免误删共用 appkey 的其他群),**先取群快照再 listen**(避免误删新群),`EASEMOB_STARTUP_SWEEP=0` 可禁用,本地 npm run dev 不触发
+13. **语音(iOS Chrome 连不上 + "测几十秒计 18 分钟时长")**:① iOS 上 getUserMedia **必须由用户手势触发**——自动进频道(无手势)取麦克风会被静默拒绝,且失败后必须留**手势重试入口**(语音按钮三态:加入中 disabled / 失败可点重试 / 已加入静音切换);Agora `createMicrophoneAudioTrack` 要**先于 `client.join`**(iOS WebKit 文档建议);codec 用 `vp8`(纯音频不影响音质)。② `voiceCall.ts` 的 Agora client 是**模块级单例**,三条泄漏路径让服务端会话挂到 Agora 超时(~10-20min,环信后台按此计费):join 失败时 `client.leave()` fire-and-forget 且立即置 null(leave 挂起=僵尸会话)、`leaveVoice` 早退跳过清理、刷新/关标签页无 `pagehide` 兜底。修复:失败路径 **await leave(3s 超时兜底)再置 null**、`leaveVoice` 用 `hasClient()` 判断而非仅 isVoiceJoined、`pagehide` 时尽力 leave;`voiceError` 带上具体原因上屏(手机无控制台,排查靠 UI)
 
 ## 后续开发指导
 
@@ -50,7 +51,7 @@ H5 在线狼人杀游戏平台:Vue 3 + TS 前端,Express + Socket.io 后端,环�
 2. **实时通话(二期)**:用户已确认用 AgoraRTC 自研封装(不嵌 React 的 EaseCallUIKit)。前提:环信控制台开通声网音视频能力
 3. **已知待办**:
    - 环信 SDK send 挂死 → 提环信工单(SDK 4.24 + ngi-a1 集群),有解则把聊天发送切回 SDK
-   - https 未配(certbot --nginx 可配,需 ECS 安全组放行 443;配后同步 `VITE_API_URL`/`VITE_ALLOWED_ORIGIN` 为 https)
+   - 语音跨浏览器兼容与"18分钟语音时长"教训已修(见心得 13),真机 iOS Chrome/Safari 回归验证待做
    - `db.js` 的 boards 表只有板子,房间数据全在内存(重启即丢)——规模大了换数据库持久化
 4. **开发约定**:
    - 改 `backend/.env` 后**必须重启后端**(dotenv 启动时读一次,nodemon 不会因 .env 变化重载)

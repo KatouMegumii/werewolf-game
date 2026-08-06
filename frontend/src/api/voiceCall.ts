@@ -58,7 +58,8 @@ export async function joinVoiceChannel(opts: RTCTokenInfo, events: VoiceEvents =
   if (isInChannel()) return
 
   AgoraRTC.setLogLevel(4) // WARN 级,减少噪音
-  client = AgoraRTC.createClient({ mode: 'live', codec: 'h264' })
+  // vp8:纯音频场景 codec 对音频质量无影响,兼容性最广(iOS WebKit/安卓/桌面);h264 曾致部分浏览器连不上
+  client = AgoraRTC.createClient({ mode: 'live', codec: 'vp8' })
   client.setClientRole('host')
 
   client.on('user-published', async (user, mediaType) => {
@@ -87,20 +88,25 @@ export async function joinVoiceChannel(opts: RTCTokenInfo, events: VoiceEvents =
   })
 
   try {
+    // iOS WebKit:必须先创建麦克风轨道再 join(文档建议),join 后再取 getUserMedia 会失败
+    localAudioTrack = await AgoraRTC.createMicrophoneAudioTrack()
     currentUid = await client.join(opts.appId, opts.channel, opts.token, opts.uid)
     currentChannel = opts.channel
     await client.enableAudioVolumeIndicator()
-
-    // 触发麦克风授权;失败时留在频道(只听)但把错误抛给上层降级
-    localAudioTrack = await AgoraRTC.createMicrophoneAudioTrack()
     await client.publish([localAudioTrack])
   } catch (err) {
-    // join 失败清理半初始化状态
-    if (client?.connectionState === 'CONNECTED') {
-      client.leave().catch(() => {})
+    // 失败路径完整清理:先关本地轨道,再等 leave 完成(3s 超时兜底)后置 null——
+    // fire-and-forget 的 leave 挂起时服务端会话不消失,会一直计费到 Agora 超时(~10-20分钟)
+    try { localAudioTrack?.close() } catch {}
+    localAudioTrack = null
+    if (client) {
+      const c = client
+      await Promise.race([c.leave().catch(() => {}), new Promise(r => setTimeout(r, 3000))])
+      try { c.removeAllListeners() } catch {}
     }
     client = null
-    localAudioTrack = null
+    currentChannel = ''
+    currentUid = 0
     throw err
   }
 }
@@ -122,7 +128,8 @@ export async function leaveVoiceChannel(): Promise<void> {
 
   try {
     if (client.connectionState === 'CONNECTED' || client.connectionState === 'CONNECTING') {
-      await client.leave()
+      // 3s 超时兜底:leave 挂起也不能让服务端会话残留到 Agora 超时(~10-20分钟)
+      await Promise.race([client.leave(), new Promise(r => setTimeout(r, 3000))])
     }
   } catch (err) {
     console.warn('⚠️ 离开语音频道失败:', err)
@@ -149,6 +156,11 @@ export function isMicEnabled(): boolean {
 
 export function isInChannel(): boolean {
   return !!client && client.connectionState === 'CONNECTED'
+}
+
+// 是否存在 SDK client(即使未 CONNECTED)——leaveVoice 据此判断是否有残留会话要清理
+export function hasClient(): boolean {
+  return !!client
 }
 
 export function getCurrentChannel(): string {

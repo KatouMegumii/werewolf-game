@@ -14,7 +14,8 @@ export const useVoiceStore = defineStore('voice', () => {
   const isVoiceJoined = ref(false) // 已进 Agora 频道
   const isJoining = ref(false)
   const isMuted = ref(false) // 自己麦克风静音
-  const voiceError = ref('') // 非空 → UI 显示降级
+  const voiceError = ref('') // 非空 → UI 显示降级(含具体原因,便于排查)
+  const voiceErrorDetail = ref('') // 原始错误详情(排查用)
   const volumes = ref<Record<string, number>>({}) // playerId -> 0~100
   const speakingIds = ref<Set<string>>(new Set()) // 正在说话(level>阈值且未静音且非自己)
   const memberMuteMap = ref<Record<string, boolean>>({}) // playerId -> 静音
@@ -67,8 +68,15 @@ export const useVoiceStore = defineStore('voice', () => {
   }
 
   function handleVoiceError(err: any) {
-    console.warn('⚠️ 语音错误:', err?.message || err)
-    voiceError.value = '语音不可用，已切换文字聊天'
+    console.warn('⚠️ 语音错误:', err?.name, err?.message || err)
+    const detail = err?.message || String(err)
+    voiceErrorDetail.value = detail
+    // iOS 无手势 getUserMedia 被拒/用户拒绝权限:提示明确,点按钮可在手势内重试(权限弹窗可出)
+    if (err?.name === 'NotAllowedError' || /permission|denied|not allowed/i.test(detail)) {
+      voiceError.value = '请允许麦克风权限后重试'
+    } else {
+      voiceError.value = `语音连接失败:${detail}`.slice(0, 60)
+    }
   }
 
   function cleanupPlayer(playerId: string) {
@@ -133,7 +141,9 @@ export const useVoiceStore = defineStore('voice', () => {
 
   async function leaveVoice() {
     const g = useGameStore()
-    if (!isVoiceJoined.value && !isJoining.value) return
+    // 无会话且无 SDK client 才早退:进频道失败残留的僵尸 client 必须收掉,
+    // 否则服务端会话一直计费到 Agora 超时(~10-20分钟)
+    if (!isVoiceJoined.value && !isJoining.value && !VoiceCall.hasClient()) return
     const wasJoined = isVoiceJoined.value
     isVoiceJoined.value = false
     isJoining.value = false
@@ -150,6 +160,14 @@ export const useVoiceStore = defineStore('voice', () => {
     memberMuteMap.value = {}
     uidToPlayer.value = new Map()
     console.log('🎙️ 已离开语音频道')
+  }
+
+  // 用户手势内重试(清错误 + 重新进频道):iOS 上 getUserMedia 必须由手势触发,
+  // 自动进频道失败后可点按钮重试,权限弹窗会正常出现
+  async function retryVoice() {
+    voiceError.value = ''
+    voiceErrorDetail.value = ''
+    await enterVoice()
   }
 
   async function toggleMute() {
@@ -174,6 +192,11 @@ export const useVoiceStore = defineStore('voice', () => {
   // ---- 信令 ----
   let signalingOn = false
 
+  // 刷新/关标签页/导航前尽力发 leave 包,避免会话残留到 Agora 服务端超时(~10-20分钟)
+  function handlePageHide() {
+    VoiceCall.leaveVoiceChannel().catch(() => {})
+  }
+
   function initSignaling() {
     const g = useGameStore()
     const socket = g.getSocket()
@@ -194,6 +217,7 @@ export const useVoiceStore = defineStore('voice', () => {
     socket.on('voiceState', handleVoiceState)
     socket.on('playerLeft', handlePlayerLeft)
     socket.on('connect', handleSocketReconnect)
+    window.addEventListener('pagehide', handlePageHide)
   }
 
   function destroySignaling() {
@@ -203,6 +227,7 @@ export const useVoiceStore = defineStore('voice', () => {
       socket.off('voiceState', handleVoiceState)
       socket.off('playerLeft')
       socket.off('connect')
+      window.removeEventListener('pagehide', handlePageHide)
     }
     signalingOn = false
   }

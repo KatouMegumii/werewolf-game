@@ -98,13 +98,13 @@
         <button
           class="voice-btn"
           :class="{ muted: voiceStore.isMuted }"
-          @click="handleToggleMute"
+          @click="handleVoiceButtonClick"
           :disabled="!voiceStore.isVoiceJoined && !voiceStore.voiceError"
           :title="voiceStore.voiceError || '实时语音：开麦即可说话，其他人能听到'"
         >
           <span class="voice-btn-icon">{{ voiceStore.isMuted ? '🔇' : '🎙' }}</span>
           <span class="voice-btn-text">
-            {{ voiceStore.voiceError ? '语音不可用' : (voiceStore.isVoiceJoined ? (voiceStore.isMuted ? '点击开麦说话' : '点击静音') : '语音连接中…') }}
+            {{ voiceStore.voiceError ? '点击重试语音' : (voiceStore.isVoiceJoined ? (voiceStore.isMuted ? '点击开麦说话' : '点击静音') : '语音连接中…') }}
           </span>
         </button>
         <input
@@ -182,7 +182,8 @@ const maxPlayers = computed(() => gameStore.currentRoom?.maxPlayers || 12)
 
 // 连接状态(环信+语音合并:都通则绿,未通则提示是哪个没通)
 const connStatus = computed(() => {
-  if (voiceStore.voiceError) return { color: '#f87171', text: '语音不可用' }
+  // 语音错误直接显示具体原因(权限/网络等,排查不用开控制台)
+  if (voiceStore.voiceError) return { color: '#f87171', text: voiceStore.voiceError }
   if (!gameStore.isEasemobConnected) return { color: '#f59e0b', text: '环信连接中…' }
   if (!voiceStore.isVoiceJoined) return { color: '#f59e0b', text: '语音连接中…' }
   return { color: '#34d399', text: '已连接' }
@@ -264,6 +265,16 @@ const sendMessage = () => {
 const handleToggleMute = async () => {
   const muted = await voiceStore.toggleMute()
   toast(muted ? '已静音' : '已开麦')
+}
+
+// 语音按钮:已加入=静音切换;加入失败=手势内重试(iOS getUserMedia 必须由用户手势触发,
+// 自动进频道被拒后,点击重试才会弹出麦克风权限)
+const handleVoiceButtonClick = () => {
+  if (!voiceStore.isVoiceJoined && voiceStore.voiceError) {
+    voiceStore.retryVoice()
+    return
+  }
+  handleToggleMute()
 }
 
 const scrollChatBottom = () => {
