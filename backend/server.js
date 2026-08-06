@@ -485,10 +485,14 @@ app.post('/api/rooms', async (req, res) => {
         }
         const roles = JSON.parse(boardRow.roles);
         if (Array.isArray(roles) && roles.length > 0) {
-          // roles是角色配置数组:[{key,name,count,...}],玩家总数 = 各角色count之和(如狼人×2+村民×6=8人)
-          const totalPlayers = roles.reduce((sum, role) => sum + (Number(role.count) || 1), 0);
-          if (totalPlayers > 0) {
-            maxPlayers = totalPlayers;
+          // 座位数 = 各角色count之和,且与前端 Config.vue getPlayerCount 保持一致:
+          // 含盗贼 -2(盗贼拿两张牌选一张,两张牌不发给玩家),双身份再 ÷2(每人两张身份)
+          const totalCards = roles.reduce((sum, role) => sum + (Number(role.count) || 1), 0);
+          const hasThief = roles.some(r => r.key === 'thief');
+          const baseCount = hasThief ? totalCards - 2 : totalCards;
+          const playerCount = boardGameConfig?.cardType === '双身份' ? Math.floor(baseCount / 2) : baseCount;
+          if (playerCount > 0) {
+            maxPlayers = playerCount;
           }
         }
       } else {
