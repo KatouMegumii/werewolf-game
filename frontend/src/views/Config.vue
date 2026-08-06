@@ -331,6 +331,7 @@ interface Role {
 }
 
 interface Board {
+  id?: number  // 数据库自增id,持久化标记(无id=新建未保存)
   name: string
   summary: string
   roles: Role[]
@@ -346,6 +347,27 @@ interface GameConfig {
   doubleExplode: '单爆' | '双爆'
   chatAfterExplode: '是' | '否'
   cardType: '单身份' | '双身份'
+}
+
+// 7项游戏规则默认值(新建板子/加载老数据无 gameConfig 时兜底)
+const DEFAULT_GAME_CONFIG: GameConfig = {
+  wolfVictory: '屠边',
+  cardFlip: '亮牌',
+  witchSelfHeal: '可',
+  chiefElection: '有',
+  doubleExplode: '单爆',
+  chatAfterExplode: '是',
+  cardType: '单身份'
+}
+
+// 解析数据库 gameConfig 列(老记录为 NULL 或损坏 → 空对象,由调用方补默认)
+function parseGameConfig(raw?: string | null): Partial<GameConfig> {
+  if (!raw) return {}
+  try {
+    return JSON.parse(raw)
+  } catch (e) {
+    return {}
+  }
 }
 
 const roleCategories = ['狼人阵营', '好人阵营', '第三方', '规则']
@@ -409,20 +431,13 @@ async function loadBoardsFromDatabase() {
     if (res.data && res.data.length > 0) {
       // 从数据库加载的板子
       boards.value = res.data.map((board: any) => ({
+        id: board.id,
         name: board.name,
         summary: board.summary,
         roles: JSON.parse(board.roles),
         isFavorite: board.isFavorite,
-        originalName: board.name,  // 记录原始名字
-        gameConfig: {
-          wolfVictory: '屠边',
-          cardFlip: '亮牌',
-          witchSelfHeal: '可',
-          chiefElection: '有',
-          doubleExplode: '单爆',
-          chatAfterExplode: '是',
-          cardType: '单身份'
-        }
+        // 老记录无 gameConfig 列时为 NULL → 逐项补默认
+        gameConfig: { ...DEFAULT_GAME_CONFIG, ...parseGameConfig(board.gameConfig) }
       }))
     } else {
       // 数据库没有板子，显示空
@@ -516,20 +531,12 @@ function getPlayerCount(board: Board): number {
 }
 
 function createNewBoard() {
-  const newBoard: Board & {originalName?: string} = {
+  const newBoard: Board = {
     name: `自定义板子${boards.value.length}`,
     summary: '0人 · 狼人0 · 好人0',
     roles: [],
-    gameConfig: {
-      wolfVictory: '屠边',
-      cardFlip: '亮牌',
-      witchSelfHeal: '可',
-      chiefElection: '有',
-      doubleExplode: '单爆',
-      chatAfterExplode: '是',
-      cardType: '单身份'
-    }
-    // 不设置originalName，标记为新板子
+    gameConfig: { ...DEFAULT_GAME_CONFIG }
+    // 不设置 id，标记为新板子(保存时 POST 创建并回填 id)
   }
   boards.value.push(newBoard)
   editingIndex.value = boards.value.length - 1
@@ -546,8 +553,8 @@ function cancelEdit() {
   // 如果是新板子（未保存），删除它
   if (editingIndex.value !== null) {
     const board = boards.value[editingIndex.value]
-    // 检查是否在数据库中存在（有originalName说明是从数据库加载的）
-    if (!(board as any).originalName) {
+    // 有 id 说明是从数据库加载的已持久化板子,取消编辑不动它
+    if (!board.id) {
       boards.value.splice(editingIndex.value, 1)
     }
   }
@@ -564,20 +571,21 @@ function closeEditDrawer() {
 function deleteBoard(index: number) {
   const realIndex = boards.value.findIndex(b => b === filteredBoards.value[index])
   if (realIndex !== -1 && boards.value.length > 1) {
-    const boardName = boards.value[realIndex].name
+    const board = boards.value[realIndex]
     boards.value.splice(realIndex, 1)
     editingIndex.value = null
 
-    // 删除数据库中的板子
-    deleteBoardFromDatabase(boardName)
+    // 删除数据库中的板子(按 id)
+    deleteBoardFromDatabase(board.id)
 
     toast('板子已删除')
   }
 }
 
-async function deleteBoardFromDatabase(boardName: string) {
+async function deleteBoardFromDatabase(boardId?: number) {
+  if (!boardId) return
   try {
-    await api.delete(`/api/boards/${encodeURIComponent(boardName)}`)
+    await api.delete(`/api/boards/${boardId}`)
   } catch (err) {
     console.error('从数据库删除板子失败:', err)
   }
@@ -587,6 +595,10 @@ async function deleteBoardFromDatabase(boardName: string) {
 function toggleFavorite(index: number) {
   const board = filteredBoards.value[index]
   board.isFavorite = !board.isFavorite
+  // 立即持久化:已入库的板子直接 PUT(收藏刷新不丢);新建未保存的板子等保存时一起带上
+  if (board.id) {
+    saveBoardToDatabase(board)
+  }
 }
 
 function resetRoles(index: number) {
@@ -616,34 +628,36 @@ function saveRoles(index: number) {
     }
   }
 
-  const originalName = (board as any).originalName || board.name
   updateBoardSummary(board)
 
-  // 保存到数据库（记录原始名字用于更新）
-  saveBoardToDatabase(board, originalName)
+  // 保存到数据库(有 id 走 PUT 原地更新,无 id 走 POST 新建并回填 id)
+  saveBoardToDatabase(board)
 
   editingIndex.value = null
   activeCategory.value = '狼人阵营'
   toast(`板子"${board.name}"已保存`)
 }
 
-async function saveBoardToDatabase(board: Board, originalName?: string) {
+async function saveBoardToDatabase(board: Board) {
   try {
-    // 如果名字改了，先删旧的再插新的
-    if (originalName && originalName !== board.name) {
-      await api.delete(`/api/boards/${encodeURIComponent(originalName)}`)
-    }
-
-    // 新增或更新板子
-    await api.post('/api/boards', {
+    const payload = {
       name: board.name,
       roles: board.roles,
       summary: board.summary,
-      isFavorite: board.isFavorite || false
-    })
-  } catch (err) {
+      isFavorite: board.isFavorite || false,
+      gameConfig: board.gameConfig || DEFAULT_GAME_CONFIG
+    }
+    if (board.id) {
+      // 已持久化:按 id 原地更新(改名直接生效,不再先删后插)
+      await api.put(`/api/boards/${board.id}`, payload)
+    } else {
+      // 新建:POST 返回 id 回填,后续更新/收藏/删除都按 id 走
+      const res = await api.post('/api/boards', payload)
+      board.id = res.data.id
+    }
+  } catch (err: any) {
     console.error('保存板子到数据库失败:', err)
-    toast('保存失败，请重试')
+    toast(err?.response?.data?.error || '保存失败，请重试')
   }
 }
 

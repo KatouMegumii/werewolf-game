@@ -29,6 +29,13 @@ export function initDb() {
     console.error('创建表失败:', err);
   });
 
+  // 迁移:存量表加 gameConfig 列(7项游戏规则JSON,老记录为 NULL,前端加载时补默认)
+  pool.query(
+    'ALTER TABLE boards ADD COLUMN IF NOT EXISTS gameConfig TEXT'
+  ).catch(err => {
+    console.error('添加 gameConfig 列失败:', err);
+  });
+
   console.log('✅ PostgreSQL 数据库初始化完成');
   return pool;
 }

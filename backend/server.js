@@ -461,13 +461,29 @@ app.post('/api/rooms', async (req, res) => {
   // 根据boardId确定房间人数（优先从数据库读板子的角色数，保证座位数与角色数一致）
   let maxPlayers = 12;
   let boardName = '默认配置';
+  let boardGameConfig = {};
   if (boardId) {
     try {
       const db = getDb();
-      const boardRes = await db.query('SELECT name, roles FROM boards WHERE id = $1', [boardId]);
-      if (boardRes.rows[0]) {
-        boardName = boardRes.rows[0].name;
-        const roles = JSON.parse(boardRes.rows[0].roles);
+      const boardUserId = String(req.headers['x-user-id'] || 'default').toLowerCase();
+      const boardRes = await db.query(
+        'SELECT name, roles, gameConfig, userId FROM boards WHERE id = $1',
+        [boardId]
+      );
+      const boardRow = boardRes.rows[0];
+      if (boardRow) {
+        // userId 鉴权:板子归属当前用户,防跨用户引用别人的板子
+        if (String(boardRow.userId || '').toLowerCase() !== boardUserId) {
+          return res.status(403).json({ error: '板子不存在或无权使用' });
+        }
+        boardName = boardRow.name;
+        // 解析 gameConfig(7项游戏规则,老记录为 NULL → 空对象,后续玩法模块用)
+        try {
+          boardGameConfig = boardRow.gameConfig ? JSON.parse(boardRow.gameConfig) : {};
+        } catch (e) {
+          boardGameConfig = {};
+        }
+        const roles = JSON.parse(boardRow.roles);
         if (Array.isArray(roles) && roles.length > 0) {
           // roles是角色配置数组:[{key,name,count,...}],玩家总数 = 各角色count之和(如狼人×2+村民×6=8人)
           const totalPlayers = roles.reduce((sum, role) => sum + (Number(role.count) || 1), 0);
@@ -511,6 +527,7 @@ app.post('/api/rooms', async (req, res) => {
     maxPlayers,
     boardId: boardId || 'default',
     boardName,
+    boardGameConfig, // 板子7项规则(内存,后续游戏玩法模块使用;暂不暴露给前端)
     hostPlayerId: playerId,
     hostEasemobUser: username || playerName, // 环信群主(群主天然在群里,进出不触发成员管理)
     settings: {},
@@ -1516,12 +1533,12 @@ app.get('/api/boards', async (req, res) => {
   }
 });
 
-// 保存或更新板子
+// 创建板子(返回自增 id 供前端后续按 id 更新/删除;同名冲突走 upsert 兼容老前端)
 app.post('/api/boards', async (req, res) => {
   try {
     const db = getDb();
     const userId = String(req.headers['x-user-id'] || 'default').toLowerCase();
-    const { name, roles, summary, isFavorite } = req.body;
+    const { name, roles, summary, isFavorite, gameConfig } = req.body;
 
     if (!name || !roles) {
       return res.status(400).json({ error: '缺少必要字段' });
@@ -1534,31 +1551,66 @@ app.post('/api/boards', async (req, res) => {
       [userId]
     );
 
-    await db.query(
-      `INSERT INTO boards (userId, name, roles, summary, isFavorite)
-       VALUES ($1, $2, $3, $4, $5)
+    const result = await db.query(
+      `INSERT INTO boards (userId, name, roles, summary, isFavorite, gameConfig)
+       VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT(userId, name) DO UPDATE SET
-       roles = $3, summary = $4, isFavorite = $5, updatedAt = CURRENT_TIMESTAMP`,
-      [userId, name, JSON.stringify(roles), summary, isFavorite]
+       roles = $3, summary = $4, isFavorite = $5, gameConfig = $6, updatedAt = CURRENT_TIMESTAMP
+       RETURNING id, name`,
+      [userId, name, JSON.stringify(roles), summary, isFavorite, gameConfig ? JSON.stringify(gameConfig) : null]
     );
 
-    res.json({ message: '板子保存成功' });
+    res.json({ message: '板子保存成功', id: result.rows[0]?.id, name: result.rows[0]?.name });
   } catch (err) {
     console.error('保存板子失败:', err);
     res.status(500).json({ error: '保存板子失败' });
   }
 });
 
-// 删除板子
-app.delete('/api/boards/:name', async (req, res) => {
+// 更新板子(按 id,userId 鉴权;改名原地生效,不再先删后插)
+app.put('/api/boards/:id', async (req, res) => {
   try {
     const db = getDb();
     const userId = String(req.headers['x-user-id'] || 'default').toLowerCase();
-    const boardName = decodeURIComponent(req.params.name);
+    const boardId = Number(req.params.id);
+    const { name, roles, summary, isFavorite, gameConfig } = req.body;
+
+    if (!boardId || !name || !roles) {
+      return res.status(400).json({ error: '缺少必要字段' });
+    }
 
     const result = await db.query(
-      'DELETE FROM boards WHERE LOWER(userId) = $1 AND name = $2',
-      [userId, boardName]
+      `UPDATE boards SET
+       name = $1, roles = $2, summary = $3, isFavorite = $4, gameConfig = $5, updatedAt = CURRENT_TIMESTAMP
+       WHERE id = $6 AND LOWER(userId) = $7`,
+      [name, JSON.stringify(roles), summary, isFavorite, gameConfig ? JSON.stringify(gameConfig) : null, boardId, userId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: '板子不存在' });
+    }
+
+    res.json({ message: '板子更新成功' });
+  } catch (err) {
+    // 改名撞 UNIQUE(userId,name) → 409
+    if (err.code === '23505') {
+      return res.status(409).json({ error: '已存在同名板子，请换一个名字' });
+    }
+    console.error('更新板子失败:', err);
+    res.status(500).json({ error: '更新板子失败' });
+  }
+});
+
+// 删除板子(按 id,userId 鉴权)
+app.delete('/api/boards/:id', async (req, res) => {
+  try {
+    const db = getDb();
+    const userId = String(req.headers['x-user-id'] || 'default').toLowerCase();
+    const boardId = Number(req.params.id);
+
+    const result = await db.query(
+      'DELETE FROM boards WHERE id = $1 AND LOWER(userId) = $2',
+      [boardId, userId]
     );
 
     if (result.rowCount === 0) {
