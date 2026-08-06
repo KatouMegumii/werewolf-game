@@ -47,10 +47,15 @@ H5 在线狼人杀游戏平台:Vue 3 + TS 前端,Express + Socket.io 后端,环�
 
 ## 后续开发指导
 
-1. **游戏核心玩法(下一大模块)**:角色分配 → 昼夜流程 → 投票 → 胜负判定。Socket.io 通道已就位(`sendSystemMessage`/`receiveMessage` 可复用),房间 `gameState: {}` 是预留位
-2. **实时通话(二期)**:用户已确认用 AgoraRTC 自研封装(不嵌 React 的 EaseCallUIKit)。前提:环信控制台开通声网音视频能力
+1. **游戏核心玩法 + 房间状态机(下一大模块,设计草案 2026-08-07)**:
+   - **状态流转**:waiting(等待)→ playing(发牌+昼夜轮转)→ ended(结算);后端唯一权威,`room.status` 字段已存在但**无流转**,`gameState: {}` 已预留
+   - **gameState 结构**:角色分配、昼夜阶段、存活、投票记录(房间对象字段已留)
+   - Socket 通道已就位(`sendSystemMessage`/`receiveMessage` 可复用);房主/系统触发流转,socket 广播状态
+   - **与语音的关联**:频道 `room_{roomId}` 已按房间隔离;分组语音(狼人夜间等)用 `switchVoiceChannel`(voiceCall.ts 已实现)按阶段切频道;**ended/房间销毁 → 服务端踢人停表**(见心得 13,待环信音视频服务端 REST API 文档确认后实现)
+2. **实时通话**:已实现(voiceCall.ts + voiceStore,语音房间模式:进房即在频道、全员 host 可发言、静音 setEnabled);跨浏览器与计费残留教训见心得 13;服务端踢人停表待做(见上)
 3. **已知待办**:
    - 环信 SDK send 挂死 → 提环信工单(SDK 4.24 + ngi-a1 集群),有解则把聊天发送切回 SDK
+   - **服务端踢人停表**:房间销毁点(空房/解散/清扫)踢出语音频道用户,根治"客户端死亡"后的计费残留——待环信音视频服务端 REST API 文档(用户提供)确认端点后实现
    - 语音跨浏览器兼容与"18分钟语音时长"教训已修(见心得 13),真机 iOS Chrome/Safari 回归验证待做
    - `db.js` 的 boards 表只有板子,房间数据全在内存(重启即丢)——规模大了换数据库持久化
 4. **开发约定**:
