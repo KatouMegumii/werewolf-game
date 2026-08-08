@@ -600,8 +600,10 @@ app.post('/api/rooms', async (req, res) => {
     try {
       const db = getDb();
       const boardUserId = String(req.headers['x-user-id'] || 'default').toLowerCase();
+      // 注意:PG 未加引号的驼峰列名会折叠成小写(userId→userid),读取必须用小写列名,
+      // 再用别名还原驼峰,保持 API 契约(曾因此 userId 读成 undefined,任何板子都 403)
       const boardRes = await db.query(
-        'SELECT name, roles, gameConfig, userId FROM boards WHERE id = $1',
+        'SELECT name, roles, userid AS "userId", gameconfig AS "gameConfig" FROM boards WHERE id = $1',
         [boardId]
       );
       const boardRow = boardRes.rows[0];
@@ -1660,8 +1662,11 @@ app.get('/api/boards', async (req, res) => {
     // userId 统一小写 + LOWER 兜底存量记录(旧版本存过大小写混合的 userId,PG 的 TEXT 比较大小写敏感)
     const userId = String(req.headers['x-user-id'] || 'default').toLowerCase();
 
+    // 列名小写(PG 折叠) + 别名还原驼峰:board.isFavorite/gameConfig 等契约不变
     const result = await db.query(
-      'SELECT * FROM boards WHERE LOWER(userId) = $1 ORDER BY isFavorite DESC, createdAt DESC',
+      `SELECT id, name, roles, summary, userid AS "userId", isfavorite AS "isFavorite",
+              gameconfig AS "gameConfig", createdat AS "createdAt", updatedat AS "updatedAt"
+       FROM boards WHERE LOWER(userid) = $1 ORDER BY isfavorite DESC, createdat DESC`,
       [userId]
     );
 
@@ -1686,15 +1691,15 @@ app.post('/api/boards', async (req, res) => {
     // 迁移:先把该用户存量大小写不一致的板子记录统一为小写 userId
     // (否则 LOWER 匹配会读到旧记录,同时小写 INSERT 又会新建一条 → 同名板子重复)
     await db.query(
-      'UPDATE boards SET userId = $1 WHERE LOWER(userId) = $1',
+      'UPDATE boards SET userid = $1 WHERE LOWER(userid) = $1',
       [userId]
     );
 
     const result = await db.query(
-      `INSERT INTO boards (userId, name, roles, summary, isFavorite, gameConfig)
+      `INSERT INTO boards (userid, name, roles, summary, isfavorite, gameconfig)
        VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT(userId, name) DO UPDATE SET
-       roles = $3, summary = $4, isFavorite = $5, gameConfig = $6, updatedAt = CURRENT_TIMESTAMP
+       ON CONFLICT(userid, name) DO UPDATE SET
+       roles = $3, summary = $4, isfavorite = $5, gameconfig = $6, updatedat = CURRENT_TIMESTAMP
        RETURNING id, name`,
       [userId, name, JSON.stringify(roles), summary, isFavorite, gameConfig ? JSON.stringify(gameConfig) : null]
     );
@@ -1720,8 +1725,8 @@ app.put('/api/boards/:id', async (req, res) => {
 
     const result = await db.query(
       `UPDATE boards SET
-       name = $1, roles = $2, summary = $3, isFavorite = $4, gameConfig = $5, updatedAt = CURRENT_TIMESTAMP
-       WHERE id = $6 AND LOWER(userId) = $7`,
+       name = $1, roles = $2, summary = $3, isfavorite = $4, gameconfig = $5, updatedat = CURRENT_TIMESTAMP
+       WHERE id = $6 AND LOWER(userid) = $7`,
       [name, JSON.stringify(roles), summary, isFavorite, gameConfig ? JSON.stringify(gameConfig) : null, boardId, userId]
     );
 
@@ -1748,7 +1753,7 @@ app.delete('/api/boards/:id', async (req, res) => {
     const boardId = Number(req.params.id);
 
     const result = await db.query(
-      'DELETE FROM boards WHERE id = $1 AND LOWER(userId) = $2',
+      'DELETE FROM boards WHERE id = $1 AND LOWER(userid) = $2',
       [boardId, userId]
     );
 
