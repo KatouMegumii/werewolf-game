@@ -115,24 +115,39 @@ async function kickVoiceChannelUsers(channelName) {
     console.warn(`⚠️ 未缓存声网 appid(尚无玩家取过 rtc-token),跳过踢人: ${channelName}`);
     return;
   }
-  try {
-    const basic = Buffer.from(`${AGORA_CONFIG.customerId}:${AGORA_CONFIG.customerSecret}`).toString('base64');
-    const res = await axios.post(
-      'https://api.sd-rtn.com/dev/v1/kicking-rule',
-      {
-        appid: cachedAgoraAppId,
-        cname: channelName,
-        time: 0, // 0 = 立即移出且规则即刻过期
-        privileges: ['join_channel']
-      },
-      {
-        headers: { 'Authorization': `Basic ${basic}`, 'Content-Type': 'application/json' },
-        timeout: 15_000
+  const basic = Buffer.from(`${AGORA_CONFIG.customerId}:${AGORA_CONFIG.customerSecret}`).toString('base64');
+  // 该 API 官方文档建议 POST 超时设 20s+(网关可能较慢,504 不一定代表失败);
+  // 5xx 重试一次,彻底确认失败才放弃
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const res = await axios.post(
+        'https://api.sd-rtn.com/dev/v1/kicking-rule',
+        {
+          appid: cachedAgoraAppId,
+          cname: channelName,
+          time: 0, // 0 = 立即移出且规则即刻过期
+          privileges: ['join_channel']
+        },
+        {
+          headers: { 'Authorization': `Basic ${basic}`, 'Content-Type': 'application/json' },
+          timeout: 20_000
+        }
+      );
+      console.log(`👢 已踢出语音频道 ${channelName} 全部用户(计费停表)`, res.data ? JSON.stringify(res.data) : '');
+      return;
+    } catch (err) {
+      const status = err.response?.status;
+      const msg = err.response?.data?.msg || err.code || err.message;
+      if (status >= 500 || !status) {
+        console.warn(`⚠️ 踢出语音频道 ${channelName} 失败(第${attempt}次):`, status, msg, '3s后重试...');
+        if (attempt === 1) {
+          await new Promise(r => setTimeout(r, 3000));
+          continue;
+        }
       }
-    );
-    console.log(`👢 已踢出语音频道 ${channelName} 全部用户(计费停表)`, res.data ? JSON.stringify(res.data) : '');
-  } catch (err) {
-    console.warn(`⚠️ 踢出语音频道 ${channelName} 失败:`, err.response?.status, err.response?.data?.msg || err.message);
+      console.warn(`⚠️ 踢出语音频道 ${channelName} 失败:`, status, msg);
+      return;
+    }
   }
 }
 
