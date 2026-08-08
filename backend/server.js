@@ -88,6 +88,54 @@ const EASEMOB_CONFIG = {
   clientSecret: process.env.EASEMOB_CLIENT_SECRET
 };
 
+// 声网 RESTful 凭证(语音踢人停表用):控制台 → 项目 → RESTful API 生成的 Customer ID/Secret
+// (RTC 是环信白标的声网项目,appid 从 rtc-token 响应缓存,见 kickVoiceChannelUsers)
+const AGORA_CONFIG = {
+  customerId: process.env.AGORA_CUSTOMER_ID,
+  customerSecret: process.env.AGORA_CUSTOMER_SECRET
+};
+
+// 从 rtc-token 响应缓存的声网 appid(与客户端实际使用的 appid 一致)
+let cachedAgoraAppId = '';
+
+/**
+ * 踢出语音频道内全部用户(声网 RESTful 频道管理,创建踢人规则):
+ * POST https://api.sd-rtn.com/dev/v1/kicking-rule
+ * 只填 cname(不填 uid) + time:0 → 该频道所有当前在线用户被移出,规则即刻过期(可加入其他频道)。
+ * 用于房间销毁点:房间没了 → 语音频道作废 → 死亡客户端计费立即停止(不再等 Agora 心跳超时 ~18min)。
+ * 失败仅 warn,不阻塞删房流程
+ */
+async function kickVoiceChannelUsers(channelName) {
+  if (!channelName) return;
+  if (!AGORA_CONFIG.customerId || !AGORA_CONFIG.customerSecret) {
+    console.warn(`⚠️ 声网凭证未配置(AGORA_CUSTOMER_ID/SECRET),跳过踢人: ${channelName}`);
+    return;
+  }
+  if (!cachedAgoraAppId) {
+    console.warn(`⚠️ 未缓存声网 appid(尚无玩家取过 rtc-token),跳过踢人: ${channelName}`);
+    return;
+  }
+  try {
+    const basic = Buffer.from(`${AGORA_CONFIG.customerId}:${AGORA_CONFIG.customerSecret}`).toString('base64');
+    const res = await axios.post(
+      'https://api.sd-rtn.com/dev/v1/kicking-rule',
+      {
+        appid: cachedAgoraAppId,
+        cname: channelName,
+        time: 0, // 0 = 立即移出且规则即刻过期
+        privileges: ['join_channel']
+      },
+      {
+        headers: { 'Authorization': `Basic ${basic}`, 'Content-Type': 'application/json' },
+        timeout: 15_000
+      }
+    );
+    console.log(`👢 已踢出语音频道 ${channelName} 全部用户(计费停表)`, res.data ? JSON.stringify(res.data) : '');
+  } catch (err) {
+    console.warn(`⚠️ 踢出语音频道 ${channelName} 失败:`, err.response?.status, err.response?.data?.msg || err.message);
+  }
+}
+
 // 内存存储（生产环境应使用数据库）
 const rooms = new Map();
 const players = new Map();
@@ -826,6 +874,8 @@ app.post('/api/rooms/:roomId/dissolve', (req, res) => {
   });
   rooms.delete(roomId);
   destroyEasemobGroup(room.easemobGroupId);
+  // 语音停表:踢出该房间语音频道内全部用户
+  kickVoiceChannelUsers(`room_${roomId}`);
 
   console.log(`💥 房主解散房间 ${roomId}`);
   res.json({ message: '房间已解散' });
@@ -1166,6 +1216,10 @@ app.post('/api/easemob/rtc-token', async (req, res) => {
       `http://ngi-a1.easemob.com/${EASEMOB_CONFIG.orgName}/${EASEMOB_CONFIG.appName}/users/${username}/token/rtc?channelName=${encodeURIComponent(channelName)}`,
       { headers: { 'Authorization': `Bearer ${appToken}` } }
     );
+    // 缓存声网 appid(踢人 API 需要;与客户端实际使用的 appid 一致)
+    if (r.data.app_id) {
+      cachedAgoraAppId = r.data.app_id;
+    }
     res.json({
       appId: r.data.app_id,
       token: r.data.rtc_token,
@@ -1255,6 +1309,8 @@ function removePlayerFromRoom(roomId, playerId, playerName) {
     console.log(`🗑️ 空房间 ${roomId} 已删除`);
     // 房间解散，同步解散环信群（失败仅warn，不阻塞）
     destroyEasemobGroup(room.easemobGroupId);
+    // 语音停表:踢出该房间语音频道内全部用户(死亡客户端计费立即停止,不再等 Agora 超时)
+    kickVoiceChannelUsers(`room_${roomId}`);
   } else if (playerId === room.hostPlayerId) {
     // 房主离开但房间还有人：自动转让房主给座位号最小的玩家（离1号位最近）
     const sorted = buildPlayerList(room);
@@ -1311,6 +1367,8 @@ setInterval(() => {
       console.log(`🧹 清扫：孤儿房间 ${roomId} 已删除`);
       // 关键：删房必须同步解散环信群，否则群会在环信后台永久残留
       destroyEasemobGroup(room.easemobGroupId);
+      // 语音停表:踢出该房间语音频道内全部用户
+      kickVoiceChannelUsers(`room_${roomId}`);
     }
   }
   // 重试解散失败的环信群（网络抖动/App Token刷新失败等补偿）

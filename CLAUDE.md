@@ -43,7 +43,7 @@ H5 在线狼人杀游戏平台:Vue 3 + TS 前端,Express + Socket.io 后端,环�
     - ③ 后端所有环信调用入口(`PUT /api/auth/user`/`/api/easemob/token`/建房/入房)统一经 `normalizeEasemobUsername()` 取环信真实名——`GET /users` 大小写不敏感,带缓存;兜底存量混合大小写记录(必须靠 GET 取真实名,不能自己转)
     - ④ 登录补**密码验证**(`grant_type=password` 换 token,错密码 401):此前 login 只 GET /users 查存在性,**任意密码可登录任意账号**
 11. **环信群生命周期必须与房间删除绑定,否则环信后台残留群**:房间数据全在内存、环信群在环信服务器持久化,两者不对称。曾有三处泄漏:① 进程重启(pm2/deploy.sh)内存房间全丢,群永久残留(**最大泄漏源**,每次发布就批量残留);② 30s 孤儿清扫删房不删群;③ `destroyEasemobGroup` 失败仅 warn 无重试。修复:删房必删群(含孤儿清扫,去掉空房死角);删群失败进 `pendingGroupDestroys` 重试队列,30s 清扫兜底(404 幂等);**启动清扫**:仅 pm2 生产环境触发,群名统一 `room_{6位房间号}` 前缀过滤(避免误删共用 appkey 的其他群),**先取群快照再 listen**(避免误删新群),`EASEMOB_STARTUP_SWEEP=0` 可禁用,本地 npm run dev 不触发
-13. **语音(iOS Chrome 连不上 + "测几十秒计 18 分钟时长")**:① iOS 上 getUserMedia **必须由用户手势触发**——自动进频道(无手势)取麦克风会被静默拒绝,且失败后必须留**手势重试入口**(语音按钮三态:加入中 disabled / 失败可点重试 / 已加入静音切换);Agora `createMicrophoneAudioTrack` 要**先于 `client.join`**(iOS WebKit 文档建议);codec 用 `vp8`(纯音频不影响音质)。② `voiceCall.ts` 的 Agora client 是**模块级单例**,三条泄漏路径让服务端会话挂到 Agora 超时(~10-20min,环信后台按此计费):join 失败时 `client.leave()` fire-and-forget 且立即置 null(leave 挂起=僵尸会话)、`leaveVoice` 早退跳过清理、刷新/关标签页无 `pagehide` 兜底。修复:失败路径 **await leave(3s 超时兜底)再置 null**、`leaveVoice` 用 `hasClient()` 判断而非仅 isVoiceJoined、`pagehide` 时尽力 leave;`voiceError` 带上具体原因上屏(手机无控制台,排查靠 UI)
+13. **语音(iOS Chrome 连不上 + "测几十秒计 18 分钟时长")**:① iOS 上 getUserMedia **必须由用户手势触发**——自动进频道(无手势)取麦克风会被静默拒绝,且失败后必须留**手势重试入口**(语音按钮三态:加入中 disabled / 失败可点重试 / 已加入静音切换);Agora `createMicrophoneAudioTrack` 要**先于 `client.join`**(iOS WebKit 文档建议);codec 用 `vp8`(纯音频不影响音质)。② `voiceCall.ts` 的 Agora client 是**模块级单例**,三条泄漏路径让服务端会话挂到 Agora 超时(~10-20min,环信后台按此计费):join 失败时 `client.leave()` fire-and-forget 且立即置 null(leave 挂起=僵尸会话)、`leaveVoice` 早退跳过清理、刷新/关标签页无 `pagehide` 兜底。修复:失败路径 **await leave(3s 超时兜底)再置 null**、`leaveVoice` 用 `hasClient()` 判断而非仅 isVoiceJoined、`pagehide` 时尽力 leave;`voiceError` 带上具体原因上屏(手机无控制台,排查靠 UI)。③ **服务端踢人停表**(2026-08-07 实现):声网 RESTful 频道管理 `POST api.sd-rtn.com/dev/v1/kicking-rule`,鉴权 = Customer ID/Secret 的 HTTP Basic(控制台→RESTful API 生成),body `{appid(从 rtc-token 响应缓存), cname, time:0, privileges:['join_channel']}`——**只填 cname 不填 uid = 频道级全踢,time:0 = 立即移出且规则即刻过期(可加入其他频道)**;房间销毁三处(空房/解散/清扫)联动调用,死亡客户端计费立即停止
 
 ## 后续开发指导
 
@@ -51,11 +51,11 @@ H5 在线狼人杀游戏平台:Vue 3 + TS 前端,Express + Socket.io 后端,环�
    - **状态流转**:waiting(等待)→ playing(发牌+昼夜轮转)→ ended(结算);后端唯一权威,`room.status` 字段已存在但**无流转**,`gameState: {}` 已预留
    - **gameState 结构**:角色分配、昼夜阶段、存活、投票记录(房间对象字段已留)
    - Socket 通道已就位(`sendSystemMessage`/`receiveMessage` 可复用);房主/系统触发流转,socket 广播状态
-   - **与语音的关联**:频道 `room_{roomId}` 已按房间隔离;分组语音(狼人夜间等)用 `switchVoiceChannel`(voiceCall.ts 已实现)按阶段切频道;**ended/房间销毁 → 服务端踢人停表**(见心得 13,待环信音视频服务端 REST API 文档确认后实现)
-2. **实时通话**:已实现(voiceCall.ts + voiceStore,语音房间模式:进房即在频道、全员 host 可发言、静音 setEnabled);跨浏览器与计费残留教训见心得 13;服务端踢人停表待做(见上)
+   - **与语音的关联**:频道 `room_{roomId}` 已按房间隔离;分组语音(狼人夜间等)用 `switchVoiceChannel`(voiceCall.ts 已实现)按阶段切频道;**ended/房间销毁 → 服务端踢人停表**(已实现,声网 RESTful kicking-rule,见心得 13)
+2. **实时通话**:已实现(voiceCall.ts + voiceStore,语音房间模式:进房即在频道、全员 host 可发言、静音 setEnabled);跨浏览器与计费残留教训见心得 13;服务端踢人停表已实现(房间销毁三处联动)
 3. **已知待办**:
    - 环信 SDK send 挂死 → 提环信工单(SDK 4.24 + ngi-a1 集群),有解则把聊天发送切回 SDK
-   - **服务端踢人停表**:房间销毁点(空房/解散/清扫)踢出语音频道用户,根治"客户端死亡"后的计费残留——待环信音视频服务端 REST API 文档(用户提供)确认端点后实现
+   - **服务端踢人停表**:已实现(声网 RESTful `POST /dev/v1/kicking-rule`,cname 级 + time:0,房间销毁三处联动:空房/解散/清扫)——**注意 .env 需配 `AGORA_CUSTOMER_ID`/`AGORA_CUSTOMER_SECRET`**(声网控制台 → 项目 → RESTful API 生成;appid 从 rtc-token 响应自动缓存,无需配置);没配凭证时踢人自动跳过仅 warn,回归"客户端死亡计费等 Agora 超时"的旧行为
    - 语音跨浏览器兼容与"18分钟语音时长"教训已修(见心得 13),真机 iOS Chrome/Safari 回归验证待做
    - `db.js` 的 boards 表只有板子,房间数据全在内存(重启即丢)——规模大了换数据库持久化
 4. **开发约定**:
