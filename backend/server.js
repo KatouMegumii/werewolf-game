@@ -88,9 +88,10 @@ const EASEMOB_CONFIG = {
   clientSecret: process.env.EASEMOB_CLIENT_SECRET
 };
 
-// 声网 RESTful 凭证(语音踢人停表用):控制台 → 项目 → RESTful API 生成的 Customer ID/Secret
-// (RTC 是环信白标的声网项目,appid 从 rtc-token 响应缓存,见 kickVoiceChannelUsers)
+// 声网 RESTful 凭证(语音踢人/清扫用):控制台 → 项目 → RESTful API 生成的 Customer ID/Secret,
+// appid 可在控制台项目页查(AGORA_APP_ID);也支持从 rtc-token 响应缓存兜底
 const AGORA_CONFIG = {
+  appId: process.env.AGORA_APP_ID || '',
   customerId: process.env.AGORA_CUSTOMER_ID,
   customerSecret: process.env.AGORA_CUSTOMER_SECRET
 };
@@ -111,8 +112,9 @@ async function kickVoiceChannelUsers(channelName) {
     console.warn(`⚠️ 声网凭证未配置(AGORA_CUSTOMER_ID/SECRET),跳过踢人: ${channelName}`);
     return;
   }
-  if (!cachedAgoraAppId) {
-    console.warn(`⚠️ 未缓存声网 appid(尚无玩家取过 rtc-token),跳过踢人: ${channelName}`);
+  const appid = AGORA_CONFIG.appId || cachedAgoraAppId;
+  if (!appid) {
+    console.warn(`⚠️ 未配置 AGORA_APP_ID 且未缓存 rtc-token appid,跳过踢人: ${channelName}`);
     return;
   }
   const basic = Buffer.from(`${AGORA_CONFIG.customerId}:${AGORA_CONFIG.customerSecret}`).toString('base64');
@@ -123,7 +125,7 @@ async function kickVoiceChannelUsers(channelName) {
       const res = await axios.post(
         'https://api.sd-rtn.com/dev/v1/kicking-rule',
         {
-          appid: cachedAgoraAppId,
+          appid,
           cname: channelName,
           time: 0, // 0 = 立即移出且规则即刻过期
           privileges: ['join_channel']
@@ -148,6 +150,60 @@ async function kickVoiceChannelUsers(channelName) {
       console.warn(`⚠️ 踢出语音频道 ${channelName} 失败:`, status, msg);
       return;
     }
+  }
+}
+
+/**
+ * 查询项目下全部在线频道(声网 RESTful 频道管理):
+ * GET https://api.sd-rtn.com/dev/v1/channel/{appid},Basic 鉴权,page_no/page_size 分页
+ * 返回 [{ channelName, userCount }];失败返回空数组(仅 warn,不阻塞)
+ */
+async function listAgoraChannels() {
+  const appid = AGORA_CONFIG.appId || cachedAgoraAppId;
+  if (!appid || !AGORA_CONFIG.customerId || !AGORA_CONFIG.customerSecret) return [];
+  const basic = Buffer.from(`${AGORA_CONFIG.customerId}:${AGORA_CONFIG.customerSecret}`).toString('base64');
+  const channels = [];
+  try {
+    const pageSize = 100;
+    for (let pageNo = 1; pageNo <= 20; pageNo++) {
+      const res = await axios.get(
+        `https://api.sd-rtn.com/dev/v1/channel/${appid}`,
+        {
+          params: { page_no: pageNo, page_size: pageSize },
+          headers: { 'Authorization': `Basic ${basic}`, 'Accept': 'application/json' },
+          timeout: 20_000
+        }
+      );
+      const data = res.data?.data || [];
+      for (const c of data) {
+        channels.push({ channelName: c.channel_name, userCount: c.user_count });
+      }
+      if (data.length < pageSize) break; // 短页 = 最后一页
+    }
+  } catch (err) {
+    console.warn('⚠️ 查询声网频道列表失败:', err.response?.status, err.response?.data?.msg || err.message);
+    return [];
+  }
+  return channels;
+}
+
+/**
+ * 清扫无主语音频道(周期任务 + 启动清扫共用):
+ * 查声网在线频道列表,凡 room_xxxxxx 前缀(含未来子频道 room_xxx_wolf)且
+ * 不属于当前 live 房间的频道一律踢出——兜住一切漏删路径(销毁踢人失败/服务器重启内存房间全丢)
+ */
+async function sweepOrphanVoiceChannels() {
+  const channels = await listAgoraChannels();
+  if (!channels.length) return;
+  const orphans = channels.filter(c => {
+    const m = /^room_(\d{6})(?:_\w+)?$/.exec(c.channelName || '');
+    if (!m) return false;
+    return !rooms.has(m[1]); // 房间不在内存 = 孤儿
+  });
+  if (!orphans.length) return;
+  console.log(`🧹 语音清扫:发现 ${orphans.length} 个无主语音频道,开始踢出...`);
+  for (const c of orphans) {
+    await kickVoiceChannelUsers(c.channelName);
   }
 }
 
@@ -1427,6 +1483,12 @@ if (snapshotSweepEnabled) {
     console.log(`🧹 周期清扫:发现 ${orphans.length} 个无主环信群,开始解散...`);
     orphans.forEach(g => destroyEasemobGroup(g.groupid));
   }, 5 * 60_000);
+
+  // 周期语音清扫(5min):兜住销毁踢人失败的残留会话(G2 自愈);
+  // 房间销毁点已踢的频道无人后自动消失,此处只处理漏网
+  setInterval(() => {
+    sweepOrphanVoiceChannels().catch(err => console.warn('⚠️ 周期语音清扫失败:', err.message));
+  }, 5 * 60_000);
 }
 
 io.on('connection', (socket) => {
@@ -1843,6 +1905,12 @@ async function bootstrap() {
   // 监听后异步解散遗留群（失败自动进重试队列，不阻塞启动）
   if (orphanSnapshot.length > 0) {
     sweepOrphanEasemobGroups(orphanSnapshot);
+  }
+
+  // 启动语音清扫:重启后内存房间全丢,重启前残留的语音会话(未踢的)靠这个清掉(G1 根治)
+  // 直接调 sweepOrphanVoiceChannels:在线频道列表在 listen 后查询,新房间有 live 保护不会被误踢
+  if (snapshotSweepEnabled) {
+    sweepOrphanVoiceChannels().catch(err => console.warn('⚠️ 启动语音清扫失败:', err.message));
   }
 }
 
